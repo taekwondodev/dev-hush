@@ -190,6 +190,63 @@ assert.match(intermediate.render(100).join("\n"), /working through it/, "earlier
 tool.result = { isError: false };
 visibility.setHushPresentation(false);
 assert.notDeepEqual(tool.render(80), [], "disabling Hush restores successful tool output");
+// Working scene: band lines, Kitty sizing, determinism, freeze/resume, and the widget's
+// in-place frame edits. Cell size 9x18 renders at 2x, so 40 columns is a 720x144 image.
+const piTui = await import(`${piRoot}/../pi-tui/dist/index.js`);
+const scene = await jiti.import("./lib/working-scene.ts");
+piTui.setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+piTui.setCellDimensions({ widthPx: 9, heightPx: 18 });
+assert.equal(scene.hushWorkingSceneSupported(), true, "Kitty terminals support the scene");
+const WING_CELL = "\x1b[48;2;22;10;28m \x1b[49m";
+const band = scene.createHushWorkingSceneAnimation();
+const bandLines = band.render(40);
+assert.equal(bandLines.length, scene.HUSH_WORKING_SCENE_ROWS, "the band is four rows");
+assert.match(bandLines[0], /\x1b\[1G\x1b_Ga=T,f=100,q=2,C=1,c=40,r=4,i=\d+/, "the image fills the width over four rows from column 1 without moving the cursor");
+for (const line of bandLines) {
+  assert.ok(line.startsWith(WING_CELL), "every band row starts with a wing-coloured cell");
+  assert.ok(line.includes(`${" ".repeat(38)}${WING_CELL}`), "every band row ends its text with a wing-coloured cell");
+}
+for (const line of bandLines.slice(1)) assert.equal(piTui.visibleWidth(line), 40, "plain band rows span the width exactly");
+const pngPayload = bandLines[0].split("\x1b_G").slice(1).map((chunk) => chunk.slice(chunk.indexOf(";") + 1, chunk.indexOf("\x1b\\"))).join("");
+assert.deepEqual(piTui.getPngDimensions(pngPayload), { widthPx: 720, heightPx: 144 }, "the frame is rendered at 2x for small cells");
+assert.strictEqual(band.render(40), bandLines, "an unchanged size returns the same lines, so Pi redraws nothing");
+assert.equal(band.frameEdit(), undefined, "without a tick there is no frame edit");
+band.tick();
+const edit = band.frameEdit();
+assert.match(edit, /^\x1b_Ga=f,i=\d+,r=1,X=1,f=100,q=2,m=1;/, "a tick edits the placed image's root frame in place");
+assert.ok(edit.split("\x1b_G").slice(2).every((chunk) => /^a=f,m=[01];/.test(chunk)), "every continuation chunk of a frame edit repeats a=f, as the Kitty protocol requires");
+assert.equal(band.frameEdit(), undefined, "each frame is sent once");
+assert.notStrictEqual(band.render(60), bandLines, "a resize transmits a new image");
+band.tick();
+band.tick();
+assert.equal(band.ticks(), 3);
+band.restoreLastRendered();
+assert.equal(band.ticks(), 1, "freezing drops ticks that were never shown");
+const twin = scene.createHushWorkingSceneAnimation();
+twin.tick();
+const anonymous = (lines) => lines.map((line) => line.replace(/i=\d+/g, "i=ID"));
+assert.deepEqual(anonymous(band.render(40)), anonymous(twin.render(40)), "equal ticks render identical frames");
+band.reset();
+assert.equal(band.ticks(), 0, "reset restarts the scene");
+piTui.setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+assert.equal(scene.hushWorkingSceneSupported(), false, "without Kitty graphics the scene is not offered");
+assert.deepEqual(scene.createHushWorkingSceneAnimation().render(40), [], "without Kitty graphics nothing is drawn");
+piTui.setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+const terminalWrites = [];
+let renderRequests = 0;
+const fakeTui = { requestRender() { renderRequests += 1; }, terminal: { write(data) { terminalWrites.push(data); } } };
+const widgetAnimation = scene.createHushWorkingSceneAnimation();
+const widget = scene.createHushWorkingSceneWidget(fakeTui, widgetAnimation);
+assert.equal(widget.render(40).length, 4, "the widget renders the band");
+await new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * 2.5));
+widget.dispose();
+const shownTicks = widgetAnimation.ticks();
+assert.ok(terminalWrites.length >= 1 && terminalWrites.every((data) => data.startsWith("\x1b_Ga=f,")), "ticks write frame edits straight to the terminal");
+assert.equal(renderRequests, 0, "ticks never request a Pi render");
+await new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * 2));
+assert.equal(widgetAnimation.ticks(), shownTicks, "dispose stops the clock");
+assert.deepEqual(widget.render(40), [], "a disposed widget renders nothing");
+
 // Exercise the installed Pi loader and renamed command against disposable state.
 const scratch = mkdtempSync(join(tmpdir(), "dev-hush-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
