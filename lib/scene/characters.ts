@@ -1,7 +1,7 @@
 // dev-hush - the two characters of the working scene, drawn from primitives in local
 // units, facing right (+x), y down. WALL-E stands about 92 units tall with his origin on
 // the ground under the treads; EVE is about 86 units tall with her origin at the bottom
-// of her hovering body. In the sunset scene both are painted as silhouettes, so only the
+// of her hovering body. In the backlit scene both are painted as silhouettes, so only the
 // accent inks (seedling, EVE's eyes, glints, thruster) keep their colour.
 import { type Painter, type Rgb, sdEllipse } from "./paint.ts";
 

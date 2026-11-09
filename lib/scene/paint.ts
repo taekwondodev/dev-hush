@@ -135,14 +135,18 @@ const sdPolygon = (x: number, y: number, v: ReadonlyArray<Point>): number => {
 };
 
 /**
- * Affine painter. While `style.silhouette` is set, every non-accent ink is replaced by
- * that colour, which is how the backlit characters are drawn.
+ * Painter styles. `silhouette` replaces every non-accent ink, which is how the backlit
+ * characters are drawn; `flat` replaces every ink, accents included, which is how their
+ * rim light is drawn; `opacity` scales every fill.
  */
+type Style = { silhouette: Rgb | null; flat: Rgb | null; opacity: number };
+
+/** Affine painter over a Canvas. */
 export class Painter {
   readonly c: Canvas;
-  style: { silhouette: Rgb | null } = { silhouette: null };
+  style: Style = { silhouette: null, flat: null, opacity: 1 };
   private m: Matrix = [1, 0, 0, 1, 0, 0];
-  private readonly stack: Array<{ m: Matrix; style: { silhouette: Rgb | null } }> = [];
+  private readonly stack: Array<{ m: Matrix; style: Style }> = [];
 
   constructor(canvas: Canvas) {
     this.c = canvas;
@@ -177,6 +181,7 @@ export class Painter {
   }
 
   private ink(color: Rgb, accent: boolean): Rgb {
+    if (this.style.flat) return this.style.flat;
     return this.style.silhouette && !accent ? this.style.silhouette : color;
   }
 
@@ -196,6 +201,7 @@ export class Painter {
     const py1 = clamp(Math.ceil(Math.max(...ys) + pad), 0, height);
     if (px0 >= px1 || py0 >= py1) return;
     const [r, g, bl] = this.ink(color, accent);
+    const base = alpha * this.style.opacity;
     const softPx = soft * scale;
     for (let py = py0; py < py1; py += 1) {
       const Y = py + 0.5 - f;
@@ -213,7 +219,7 @@ export class Painter {
           if (cover <= 0) continue;
           if (cover > 1) cover = 1;
         }
-        const k = cover * alpha;
+        const k = cover * base;
         data[o] = data[o]! + (r - data[o]!) * k;
         data[o + 1] = data[o + 1]! + (g - data[o + 1]!) * k;
         data[o + 2] = data[o + 2]! + (bl - data[o + 2]!) * k;

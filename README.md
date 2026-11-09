@@ -1,6 +1,6 @@
 # dev-hush
 
-A conversation-presentation toggle for [Pi](https://pi.dev). Keep assistant prose visible while hiding thinking and tool activity. While the agent runs, a four-row animated scene replaces the working indicator: WALL-E carries a seedling after EVE across a sunset skyline, drawn through the Kitty graphics protocol.
+A conversation-presentation toggle for [Pi](https://pi.dev). Keep assistant prose visible while hiding thinking and tool activity. While the agent runs, a four-row animated scene replaces the working indicator: WALL-E carries a seedling after EVE against a setting sun, painted over the terminal's own background through the Kitty graphics protocol.
 
 This extension changes presentation only. Input, tool execution, model context, session storage and export data stay intact. `/export` and `/share` use the complete stock transcript.
 
@@ -23,7 +23,7 @@ This checkout may already be installed on the maintainer's machine. Do not clone
 - `Ctrl+Alt+C` is the existing keyboard shortcut, retained for muscle memory.
 - The preference is off by default and is stored in `<agent-dir>/dev-hush`, outside this repository.
 - Assistant replies remain visible, including streaming and intermediate reports.
-- The working scene needs a terminal with Kitty graphics (Rex, Kitty, Ghostty, WezTerm). There is no text fallback: elsewhere Pi's stock working row stays. In Rex, set the pane padding colour to extend the edge cells so the foreground piles continue into the padding.
+- The working scene needs a terminal with Kitty graphics (Rex, Kitty, Ghostty, WezTerm). There is no text fallback: elsewhere Pi's stock working row stays. The scene asks the terminal for its background colour (OSC 11) and paints over it, so the band has no visible edge.
 - Quota/usage-limit and provider-connectivity diagnostics remain visible. Ordinary tool failures and other automatic diagnostics are hidden while the filter is active. Disable it to inspect full details.
 - With [dev](https://github.com/taekwondodev/dev), failed agent children get a compact red notice with their IDs, not raw logs.
 

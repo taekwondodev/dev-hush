@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Kun Chen. MIT License - see the LICENSE file in this directory.
 //
 // Hush replaces Pi's stock working row with a four-row Kitty-graphics scene (see
-// ./scene/sunset.ts) while one logical agent run is active. This module owns the
+// ./scene/backlit.ts) while one logical agent run is active. This module owns the
 // deterministic tick clock, the session-scoped freeze/resume state, the band lines
 // Pi renders, the in-place frame updates, and the temporary TUI widget. ../index.ts
 // owns when the presentation is installed and removed, and stays the sole caller of
@@ -12,12 +12,17 @@
 //
 // Transport: Pi's alternate-screen renderer retransmits an image and re-places every
 // visible image whenever an image row changes. To keep the renderer out of the
-// per-frame path, render(width) returns the same lines for a given size: edge cells,
-// then one Kitty transmit of the first frame under a stable image id. Every tick then
-// edits that image's root frame in place (Kitty animation `a=f`, verified in Rex),
-// written straight to the terminal, so no row changes and nothing else is redrawn.
-// The edge cells carry the wing colour so a terminal that extends edge colours into
-// its padding continues the piles.
+// per-frame path, render(width) returns the same lines for a given size and background:
+// one Kitty transmit of the first frame under a stable image id, then empty rows, as
+// Pi's own Image component does. Every tick then edits that image's root frame in place
+// (Kitty animation `a=f`, verified in Rex), written straight to the terminal, so no row
+// changes and nothing else is redrawn.
+//
+// Background: the scene is painted over the terminal's own background so the band has
+// no visible edge. Each new widget asks the terminal for it through Pi's public
+// TUI.queryTerminalColors() and keeps the answer for later working periods; until the
+// first answer arrives the band is four empty rows. A changed answer requests one Pi
+// render, the only render the widget ever requests.
 //
 // Continuity: one extension-owned animation instance survives hide/show within the
 // same Pi process and Hush extension lifetime. Disposing the widget drops ticks that
@@ -28,19 +33,20 @@
 // to the canvas, so no clamp step exists.
 //
 // Verified against Pi 1.5.0: ExtensionUIContext.setWidget() with a component factory,
-// per-widget dispose(), TUI.terminal.write(), and renderImage() producing exactly
+// per-widget dispose(), TUI.terminal.write(), TUI.queryTerminalColors(), and renderImage() producing exactly
 // `width` columns by HUSH_WORKING_SCENE_ROWS rows for a canvas sized from the cell
 // dimensions Pi learned from the terminal.
 import {
   type Component,
   type TUI,
+  type TerminalColors,
   allocateImageId,
   getCapabilities,
   getCellDimensions,
   renderImage,
 } from "@earendil-works/pi-tui";
-import { Canvas } from "./scene/paint.ts";
-import { WING, paintSunsetBackdrop, renderSunset } from "./scene/sunset.ts";
+import { paintBacklitBackdrop, renderBacklit } from "./scene/backlit.ts";
+import { Canvas, type Rgb } from "./scene/paint.ts";
 
 export const HUSH_WORKING_SCENE_WIDGET_KEY = "dev-hush-working-scene";
 /** Band height in terminal rows. */
@@ -48,13 +54,21 @@ export const HUSH_WORKING_SCENE_ROWS = 4;
 /** Scheduler period: 12 frames per second. Scene time derives from ticks, so this only changes smoothness. */
 export const HUSH_WORKING_SCENE_TICK_MS = 83;
 
-const EDGE_CELL = `\u001b[48;2;${WING.join(";")}m \u001b[49m`;
-const CURSOR_TO_COLUMN_1 = "\u001b[1G";
 const KITTY_CHUNK = 4096;
+/** How long a new widget waits for the terminal's colours before painting over FALLBACK_BACKGROUND. */
+const BACKGROUND_QUERY_MS = 300;
+/** For a terminal that does not report its background (OSC 11). */
+const FALLBACK_BACKGROUND: Rgb = [0, 0, 0];
 
 export type HushWorkingSceneAnimation = {
-  /** The band's lines for `width`, stable while the size is unchanged. [] when nothing can be drawn. */
+  /** The band's lines for `width`, stable while the size and background are unchanged. [] when nothing can be drawn. */
   render(width: number): string[];
+  /**
+   * Record the terminal background to paint over; undefined when the terminal did not report
+   * one, which keeps an earlier answer or falls back to black. True when the band must be
+   * rendered again.
+   */
+  setBackground(reported: Rgb | undefined): boolean;
   /** Advance one scheduler tick. */
   tick(): void;
   /** Kitty command that updates the placed image to the current tick, or undefined when there is nothing to update. */
@@ -67,7 +81,7 @@ export type HushWorkingSceneAnimation = {
   ticks(): number;
 };
 
-type Geometry = { widthPx: number; heightPx: number; edgePx: number };
+type Geometry = { widthPx: number; heightPx: number };
 type Placement = Geometry & { width: number; lines: string[] };
 
 /** True when Pi detected a Kitty-graphics terminal. Hush has no text fallback for the scene. */
@@ -82,7 +96,6 @@ function geometry(width: number): Geometry {
   return {
     widthPx: width * cell.widthPx * k,
     heightPx: HUSH_WORKING_SCENE_ROWS * cell.heightPx * k,
-    edgePx: cell.widthPx * k,
   };
 }
 
@@ -105,18 +118,19 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
   let ticks = 0;
   let shownTicks = 0;
   let placement: Placement | undefined;
+  let background: Rgb | undefined;
   let backdrop: Canvas | undefined;
   let frame: Canvas | undefined;
 
   const seconds = (): number => (ticks * HUSH_WORKING_SCENE_TICK_MS) / 1000;
 
-  const paintFrame = ({ widthPx, heightPx, edgePx }: Geometry): string => {
+  const paintFrame = ({ widthPx, heightPx }: Geometry, bg: Rgb): string => {
     if (!backdrop || !frame || backdrop.width !== widthPx || backdrop.height !== heightPx) {
       backdrop = new Canvas(widthPx, heightPx);
-      paintSunsetBackdrop(backdrop);
+      paintBacklitBackdrop(backdrop, bg);
       frame = new Canvas(widthPx, heightPx);
     }
-    renderSunset(frame, seconds(), edgePx, backdrop);
+    renderBacklit(frame, seconds(), backdrop);
     return frame.toPNG(1).toString("base64");
   };
 
@@ -125,6 +139,16 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
 
     tick(): void {
       ticks += 1;
+    },
+
+    setBackground(reported: Rgb | undefined): boolean {
+      const next = reported ?? background ?? FALLBACK_BACKGROUND;
+      if (background && background.every((v, i) => v === next[i])) return false;
+      background = next;
+      // Both the cached backdrop and the transmitted image carry the old background.
+      backdrop = undefined;
+      placement = undefined;
+      return true;
     },
 
     reset(): void {
@@ -140,6 +164,8 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
 
     render(width: number): string[] {
       if (width < 2) return [];
+      // Hold the band's place until the terminal reports its background.
+      if (!background) return Array.from({ length: HUSH_WORKING_SCENE_ROWS }, () => "");
       const size = geometry(width);
       const current =
         placement &&
@@ -147,16 +173,15 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
         placement.widthPx === size.widthPx &&
         placement.heightPx === size.heightPx;
       if (!current) {
-        const image = renderImage(paintFrame(size), { widthPx: size.widthPx, heightPx: size.heightPx }, {
+        const image = renderImage(paintFrame(size, background), { widthPx: size.widthPx, heightPx: size.heightPx }, {
           maxWidthCells: width,
           maxHeightCells: HUSH_WORKING_SCENE_ROWS,
           imageId,
           moveCursor: false,
         });
         if (!image) return [];
-        const edges = `${EDGE_CELL}${" ".repeat(width - 2)}${EDGE_CELL}`;
-        const lines = [`${edges}${CURSOR_TO_COLUMN_1}${image.sequence}`];
-        for (let row = 1; row < HUSH_WORKING_SCENE_ROWS; row += 1) lines.push(edges);
+        const lines = [image.sequence];
+        for (let row = 1; row < HUSH_WORKING_SCENE_ROWS; row += 1) lines.push("");
         placement = { ...size, width, lines };
         shownTicks = ticks;
       }
@@ -164,8 +189,8 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
     },
 
     frameEdit(): string | undefined {
-      if (!placement || shownTicks === ticks) return undefined;
-      const png = paintFrame(placement);
+      if (!placement || !background || shownTicks === ticks) return undefined;
+      const png = paintFrame(placement, background);
       shownTicks = ticks;
       // Replace the root frame's pixels; the terminal repaints the placement in place.
       return kittyFrameCommand(`i=${imageId},r=1,X=1,f=100,q=2`, png);
@@ -178,7 +203,7 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
  * Pi disposes the previous component before installing a replacement under the same
  * key and when it clears extension widgets, so the scheduler cannot outlive the widget
  * or duplicate. Ticks never request a Pi render: they write the frame edit directly,
- * and the band lines stay unchanged until a resize.
+ * and the band lines stay unchanged until a resize or a new terminal background.
  */
 export function createHushWorkingSceneWidget(
   tui: TUI,
@@ -193,10 +218,17 @@ export function createHushWorkingSceneWidget(
   }, HUSH_WORKING_SCENE_TICK_MS);
   // The animation must never keep Pi's process alive on its own.
   timer.unref?.();
+  // Ask on every new widget so a changed terminal theme is picked up at the next working period.
+  // A retired widget's answer must not touch the animation its replacement now draws from.
+  const applyColors = ({ background }: TerminalColors): void => {
+    if (disposed) return;
+    if (animation.setBackground(background && [background.r, background.g, background.b])) tui.requestRender();
+  };
+  void tui.queryTerminalColors({ timeoutMs: BACKGROUND_QUERY_MS, onLateReply: applyColors }).then(applyColors);
 
   return {
     render: (width) => (disposed ? [] : animation.render(width)),
-    // The lines depend only on size and the wing colour constant, never on the theme.
+    // The lines depend only on size and the terminal background, never on Pi's theme.
     invalidate: () => {},
     dispose: () => {
       if (disposed) return;
