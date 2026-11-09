@@ -1,3 +1,5 @@
 node_modules/
 .DS_Store
 *.log
+# Local scene prototypes, kept out of the repository.
+prototypes/
