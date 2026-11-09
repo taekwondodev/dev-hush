@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="assets/dev-hush.gif" alt="dev-hush in action: Pi with Hush on, showing only the conversation while WALL-E chases EVE in the working scene">
-</p>
+https://github.com/user-attachments/assets/051dd9a3-8a47-4166-ba55-a0036985b586
 
 <h1 align="center">dev-hush</h1>
 
