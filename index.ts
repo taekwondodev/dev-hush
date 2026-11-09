@@ -5,7 +5,7 @@
 //
 // Presentation adapters target Pi's assistant/tool-row components. Lifecycle
 // hooks track agent_start and agent_settled events.
-// ./lib/working-ship.ts owns the animated working presentation this file
+// ./lib/working-scene.ts owns the animated working presentation this file
 // installs. ./lib/preference.ts owns the local state file. Presentation adapters
 // probe the exact Pi API seams they patch and degrade independently with one
 // clear diagnostic if a future Pi removes them.
@@ -26,10 +26,11 @@ import {
   setHushStockExportRendering,
 } from "./lib/visibility.ts";
 import {
-  HUSH_WORKING_SHIP_WIDGET_KEY,
-  createHushWorkingShipAnimation,
-  createHushWorkingShipWidget,
-} from "./lib/working-ship.ts";
+  HUSH_WORKING_SCENE_WIDGET_KEY,
+  createHushWorkingSceneAnimation,
+  createHushWorkingSceneWidget,
+  hushWorkingSceneSupported,
+} from "./lib/working-scene.ts";
 
 // Each presentation adapter probes the exact Pi API it patches. If a future Pi
 // removes that API, only the affected adapter degrades; the rest of Hush keeps
@@ -50,15 +51,15 @@ export default function (pi: ExtensionAPI) {
 
   let removeTerminalInputHandler: (() => void) | undefined;
   // One logical agent run, tracked from agent_start through agent_settled rather
-  // than from turns or tool calls, so the boat never flickers between tool calls,
+  // than from turns or tool calls, so the scene never flickers between tool calls,
   // automatic continuations, retries, or compaction that stay inside the same run.
   let agentRunActive = false;
-  let workingShipShown = false;
+  let workingSceneShown = false;
   // One animation instance per extension lifetime. Hiding the working widget
   // freezes this state; the next working period resumes it. session_start resets
-  // it so a fresh Pi session starts at the normal initial position. Never
+  // it so a fresh Pi session starts from the beginning of the scene. Never
   // module-global.
-  const workingShipAnimation = createHushWorkingShipAnimation();
+  const workingSceneAnimation = createHushWorkingSceneAnimation();
 
   // Single owner of Hush's working-row presentation choice. The widget is only
   // created or removed on a real transition, so repeated starts cannot duplicate
@@ -67,17 +68,19 @@ export default function (pi: ExtensionAPI) {
     ui: ExtensionUIContext,
     forceStockVisibility = false,
   ): void => {
-    const showShip = agentRunActive && hushPresentationIsActive();
-    if (showShip !== workingShipShown) {
-      workingShipShown = showShip;
+    // Kitty graphics are a prerequisite, not a fallback point: without them Pi's
+    // stock working row stays.
+    const showScene = agentRunActive && hushPresentationIsActive() && hushWorkingSceneSupported();
+    if (showScene !== workingSceneShown) {
+      workingSceneShown = showScene;
       ui.setWidget(
-        HUSH_WORKING_SHIP_WIDGET_KEY,
-        showShip
-          ? (tui) => createHushWorkingShipWidget(tui, workingShipAnimation)
+        HUSH_WORKING_SCENE_WIDGET_KEY,
+        showScene
+          ? (tui) => createHushWorkingSceneWidget(tui, workingSceneAnimation)
           : undefined,
       );
-      ui.setWorkingVisible(!showShip);
-    } else if (forceStockVisibility && !showShip) {
+      ui.setWorkingVisible(!showScene);
+    } else if (forceStockVisibility && !showScene) {
       ui.setWorkingVisible(true);
     }
   };
@@ -86,9 +89,9 @@ export default function (pi: ExtensionAPI) {
     setHushPresentation(loadHushPreference());
     setHushStockExportRendering(false);
     agentRunActive = false;
-    workingShipShown = false;
-    // A genuine new session lifetime starts the boat at the normal initial position.
-    workingShipAnimation.reset();
+    workingSceneShown = false;
+    // A genuine new session lifetime starts the scene from the beginning.
+    workingSceneAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
     ctx.ui.setHiddenThinkingLabel(hushPresentationIsActive() ? "" : undefined);
     removeTerminalInputHandler?.();

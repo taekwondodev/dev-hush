@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { inflateSync } from "node:zlib";
 
 const agentDir = fileURLToPath(new URL("../../", import.meta.url));
 const release = readFileSync(join(agentDir, "install/current-version"), "utf8").trim();
@@ -190,6 +191,139 @@ assert.match(intermediate.render(100).join("\n"), /working through it/, "earlier
 tool.result = { isError: false };
 visibility.setHushPresentation(false);
 assert.notDeepEqual(tool.render(80), [], "disabling Hush restores successful tool output");
+// Working scene: band lines, Kitty sizing, the terminal background, determinism,
+// freeze/resume, and the widget's in-place frame edits. Cell size 9x18 renders at 2x,
+// so 40 columns is a 720x144 image.
+const piTui = await import(`${piRoot}/../pi-tui/dist/index.js`);
+const scene = await jiti.import("./lib/working-scene.ts");
+piTui.setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+piTui.setCellDimensions({ widthPx: 9, heightPx: 18 });
+assert.equal(scene.hushWorkingSceneSupported(), true, "Kitty terminals support the scene");
+const BG = [35, 33, 54];
+const pngOf = (line) => Buffer.from(line.split("\x1b_G").slice(1).map((chunk) => chunk.slice(chunk.indexOf(";") + 1, chunk.indexOf("\x1b\\"))).join(""), "base64");
+/** The top-left pixel of an RGB PNG from lib/scene/paint.ts, whose first pixel of each row is stored raw. */
+const cornerPixel = (png) => {
+  const idat = png.indexOf("IDAT");
+  return [...inflateSync(png.subarray(idat + 4, idat + 4 + png.readUInt32BE(idat - 4))).subarray(1, 4)];
+};
+const band = scene.createHushWorkingSceneAnimation();
+assert.deepEqual(band.render(40), ["", "", "", ""], "until the terminal reports its background the band holds four empty rows");
+assert.equal(band.frameEdit(), undefined, "nothing is edited before the image exists");
+assert.equal(band.setBackground(BG), true, "a first background must be rendered");
+assert.equal(band.setBackground([...BG]), false, "the same background changes nothing");
+assert.equal(band.setBackground(undefined), false, "a later query without an answer keeps the known background");
+const bandLines = band.render(40);
+assert.equal(bandLines.length, scene.HUSH_WORKING_SCENE_ROWS, "the band is four rows");
+assert.match(bandLines[0], /^\x1b_Ga=T,f=100,q=2,C=1,c=40,r=4,i=\d+/, "the image fills the width over four rows without moving the cursor");
+assert.deepEqual(bandLines.slice(1), ["", "", ""], "the rows under the image stay empty, as in Pi's own Image component");
+assert.deepEqual(piTui.getPngDimensions(pngOf(bandLines[0]).toString("base64")), { widthPx: 720, heightPx: 144 }, "the frame is rendered at 2x for small cells");
+assert.deepEqual(cornerPixel(pngOf(bandLines[0])), BG, "the scene is painted over the terminal background, so the band has no visible edge");
+assert.strictEqual(band.render(40), bandLines, "an unchanged size returns the same lines, so Pi redraws nothing");
+assert.equal(band.frameEdit(), undefined, "without a tick there is no frame edit");
+band.tick();
+const edit = band.frameEdit();
+assert.match(edit, /^\x1b_Ga=f,i=\d+,r=1,X=1,f=100,q=2,m=1;/, "a tick edits the placed image's root frame in place");
+assert.ok(edit.split("\x1b_G").slice(2).every((chunk) => /^a=f,m=[01];/.test(chunk)), "every continuation chunk of a frame edit repeats a=f, as the Kitty protocol requires");
+assert.equal(band.frameEdit(), undefined, "each frame is sent once");
+assert.notStrictEqual(band.render(60), bandLines, "a resize transmits a new image");
+band.tick();
+band.tick();
+assert.equal(band.ticks(), 3);
+band.restoreLastRendered();
+assert.equal(band.ticks(), 1, "freezing drops ticks that were never shown");
+const twin = scene.createHushWorkingSceneAnimation();
+twin.setBackground(BG);
+twin.tick();
+const anonymous = (lines) => lines.map((line) => line.replace(/i=\d+/g, "i=ID"));
+assert.deepEqual(anonymous(band.render(40)), anonymous(twin.render(40)), "equal ticks render identical frames");
+assert.equal(band.setBackground([250, 244, 237]), true, "a new terminal background must be rendered");
+assert.deepEqual(cornerPixel(pngOf(band.render(40)[0])), [250, 244, 237], "a new background repaints the scene over it");
+band.reset();
+assert.equal(band.ticks(), 0, "reset restarts the scene");
+piTui.setCapabilities({ images: null, trueColor: true, hyperlinks: true });
+assert.equal(scene.hushWorkingSceneSupported(), false, "without Kitty graphics the scene is not offered");
+const textOnly = scene.createHushWorkingSceneAnimation();
+textOnly.setBackground(BG);
+assert.deepEqual(textOnly.render(40), [], "without Kitty graphics nothing is drawn");
+piTui.setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+const terminalWrites = [];
+let renderRequests = 0;
+const fakeTui = (reply) => ({
+  requestRender() { renderRequests += 1; },
+  queryTerminalColors: async () => reply,
+  terminal: { write(data) { terminalWrites.push(data); } },
+});
+const widgetAnimation = scene.createHushWorkingSceneAnimation();
+const widget = scene.createHushWorkingSceneWidget(fakeTui({ background: { r: 35, g: 33, b: 54 } }), widgetAnimation);
+assert.deepEqual(widget.render(40), ["", "", "", ""], "a first widget waits for the terminal background");
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(renderRequests, 1, "the reported background requests one Pi render");
+assert.deepEqual(cornerPixel(pngOf(widget.render(40)[0])), BG, "the widget paints over the reported background");
+await new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * 2.5));
+widget.dispose();
+const shownTicks = widgetAnimation.ticks();
+assert.ok(terminalWrites.length >= 1 && terminalWrites.every((data) => data.startsWith("\x1b_Ga=f,")), "ticks write frame edits straight to the terminal");
+assert.equal(renderRequests, 1, "ticks never request a Pi render");
+await new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * 2));
+assert.equal(widgetAnimation.ticks(), shownTicks, "dispose stops the clock");
+assert.deepEqual(widget.render(40), [], "a disposed widget renders nothing");
+const again = scene.createHushWorkingSceneWidget(fakeTui({ background: { r: 35, g: 33, b: 54 } }), widgetAnimation);
+assert.match(again.render(40)[0], /^\x1b_Ga=T,/, "the next working period draws at once with the known background");
+await new Promise((resolve) => setImmediate(resolve));
+assert.equal(renderRequests, 1, "an unchanged background requests no render");
+again.dispose();
+const silent = scene.createHushWorkingSceneAnimation();
+const silentWidget = scene.createHushWorkingSceneWidget(fakeTui({}), silent);
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(cornerPixel(pngOf(silentWidget.render(40)[0])), [0, 0, 0], "a terminal that never reports its background gets black");
+silentWidget.dispose();
+// Queries whose answers the test releases by hand, including Pi's late replies after the timeout.
+const deferredTui = () => {
+  const query = {};
+  const tui = {
+    requestRender() { renderRequests += 1; },
+    queryTerminalColors({ onLateReply }) {
+      query.late = onLateReply;
+      return new Promise((resolve) => { query.answer = resolve; });
+    },
+    terminal: { write() {} },
+  };
+  return { tui, query };
+};
+const slow = deferredTui();
+const slowWidget = scene.createHushWorkingSceneWidget(slow.tui, scene.createHushWorkingSceneAnimation());
+renderRequests = 0;
+slow.query.answer({});
+await new Promise((resolve) => setImmediate(resolve));
+assert.deepEqual(cornerPixel(pngOf(slowWidget.render(40)[0])), [0, 0, 0], "a query that times out paints over black for now");
+slow.query.late({ background: { r: 35, g: 33, b: 54 } });
+assert.equal(renderRequests, 2, "a late reply after the timeout still requests a render");
+assert.deepEqual(cornerPixel(pngOf(slowWidget.render(40)[0])), BG, "a late reply replaces the fallback background");
+slow.query.late({ background: { r: 35, g: 33, b: 54 } });
+assert.equal(renderRequests, 2, "a repeated late reply requests nothing");
+slowWidget.dispose();
+for (const resetBetween of [false, true]) {
+  const shared = scene.createHushWorkingSceneAnimation();
+  shared.setBackground(BG);
+  const retired = deferredTui();
+  scene.createHushWorkingSceneWidget(retired.tui, shared).dispose();
+  if (resetBetween) shared.reset();
+  const active = deferredTui();
+  const activeWidget = scene.createHushWorkingSceneWidget(active.tui, shared);
+  const activeLines = activeWidget.render(40);
+  renderRequests = 0;
+  retired.query.answer({ background: { r: 0, g: 0, b: 0 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.strictEqual(activeWidget.render(40), activeLines, "a retired widget's answer leaves the active widget's image alone");
+  shared.tick();
+  assert.match(shared.frameEdit(), /^\x1b_Ga=f,/, "the active widget keeps animating after a retired widget's answer");
+  active.query.answer({ background: { r: 0, g: 0, b: 0 } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(renderRequests, 1, "the active widget's own answer requests the render for the new background");
+  assert.deepEqual(cornerPixel(pngOf(activeWidget.render(40)[0])), [0, 0, 0], "the active widget repaints over the new background");
+  activeWidget.dispose();
+}
+
 // Exercise the installed Pi loader and renamed command against disposable state.
 const scratch = mkdtempSync(join(tmpdir(), "dev-hush-"));
 const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
