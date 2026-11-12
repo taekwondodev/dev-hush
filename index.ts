@@ -44,6 +44,15 @@ function installHushPresentationAdapter(name: string, install: () => void): void
   }
 }
 
+// Tool and dev-work rows consult Hush on every render, so only assistant
+// messages hold stale content. Setting the hidden-thinking label rebuilds every
+// assistant message and requests a render; Pi redraws the whole transcript when
+// a changed line lies above the viewport. Unlike flipping Ctrl+O expansion, it
+// posts no "Tool output" status line.
+function redrawTranscript(ui: ExtensionUIContext): void {
+  ui.setHiddenThinkingLabel(hushPresentationIsActive() ? "" : undefined);
+}
+
 export default function (pi: ExtensionAPI) {
   installHushPresentationAdapter("collapsed-thinking", installHushCollapsedThinkingLayout);
   installHushPresentationAdapter("built-in-tool-shells", installHushBuiltInToolShellLayout);
@@ -93,7 +102,7 @@ export default function (pi: ExtensionAPI) {
     // A genuine new session lifetime starts the scene from the beginning.
     workingSceneAnimation.reset();
     applyWorkingPresentation(ctx.ui, true);
-    ctx.ui.setHiddenThinkingLabel(hushPresentationIsActive() ? "" : undefined);
+    redrawTranscript(ctx.ui);
     removeTerminalInputHandler?.();
     removeTerminalInputHandler = ctx.ui.onTerminalInput((data) => {
       if (!getKeybindings().matches(data, "tui.input.submit")) return;
@@ -113,9 +122,7 @@ export default function (pi: ExtensionAPI) {
       setHushStockExportRendering(true);
       setTimeout(() => {
         setHushStockExportRendering(false);
-        const expanded = ctx.ui.getToolsExpanded();
-        ctx.ui.setToolsExpanded(!expanded);
-        ctx.ui.setToolsExpanded(expanded);
+        redrawTranscript(ctx.ui);
       }, 0);
     });
   });
@@ -149,13 +156,7 @@ export default function (pi: ExtensionAPI) {
     persistHushPreference(active);
     setHushPresentation(active);
     applyWorkingPresentation(ctx.ui, true);
-    ctx.ui.setHiddenThinkingLabel(active ? "" : undefined);
-
-    // Flip expansion twice to force a transcript redraw while preserving the
-    // user's exact Ctrl+O tools-expanded state.
-    const expanded = ctx.ui.getToolsExpanded();
-    ctx.ui.setToolsExpanded(!expanded);
-    ctx.ui.setToolsExpanded(expanded);
+    redrawTranscript(ctx.ui);
   };
 
   pi.registerCommand("hush", {
