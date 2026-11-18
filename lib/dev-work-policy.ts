@@ -12,12 +12,12 @@ const failedAgents = (items: readonly unknown[]): string[] => [...new Set(items.
 export function failedDevWorkChildren(details: unknown): string[] {
   if (!record(details)) return [];
   switch (details.kind) {
-    case "attempt":
-      return failedAgents([details.attempt]);
+    case "run":
+      return failedAgents([details.run]);
     case "inspection":
       return failedAgents([details.inspection]);
-    case "snapshot":
-      return record(details.snapshot) && Array.isArray(details.snapshot.records) ? failedAgents(details.snapshot.records) : [];
+    case "runs":
+      return record(details.runs) && Array.isArray(details.runs.records) ? failedAgents(details.runs.records) : [];
     default:
       return [];
   }

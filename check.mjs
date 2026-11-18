@@ -174,11 +174,11 @@ assert.deepEqual(new pi.CustomMessageComponent(contentOnly).render(100), [], "fa
 visibility.setHushPresentation(false);
 visibility.setHushPresentation(true);
 const workRow = new pi.ToolExecutionComponent("work", "inspect-child", {}, {}, undefined, { requestRender() {} }, process.cwd());
-workRow.updateResult({ content: [{ type: "text", text: JSON.stringify(childFailure) }], details: { kind: "attempt", attempt: childFailure }, isError: false });
+workRow.updateResult({ content: [{ type: "text", text: JSON.stringify(childFailure) }], details: { kind: "run", run: childFailure }, isError: false });
 assert.match(workRow.render(100).join("\n"), /\x1b\[31mChild failed:/, "work results show failed children in red even when the tool succeeded");
 assert.equal(workRow.render(100)[0], "", "work failure notices add a blank row before the error");
 assert.doesNotMatch(workRow.render(100).join("\n"), /raw child error|raw script output/, "work result notices do not expose logs");
-workRow.updateResult({ content: [], details: { kind: "snapshot", snapshot: { records: [childFailure, { ...childFailure, kind: "process" }] } }, isError: false });
+workRow.updateResult({ content: [], details: { kind: "runs", runs: { records: [childFailure, { ...childFailure, kind: "process" }] } }, isError: false });
 assert.match(workRow.render(100).join("\n"), /Child failed:/, "work list summaries retain failed children");
 workRow.updateResult({ content: [], details: { kind: "inspection", inspection: childFailure }, isError: false });
 assert.match(workRow.render(100).join("\n"), /Child failed:/, "an inspection of a failed child is flagged");
