@@ -191,11 +191,13 @@ assert.match(intermediate.render(100).join("\n"), /working through it/, "earlier
 tool.result = { isError: false };
 visibility.setHushPresentation(false);
 assert.notDeepEqual(tool.render(80), [], "disabling Hush restores successful tool output");
-// Working scene: band lines, Kitty sizing, the terminal background, determinism,
-// freeze/resume, and the widget's in-place frame edits. Cell size 9x18 renders at 2x,
-// so 40 columns is a 720x144 image.
+// Working scene: the backdrop lines Pi places, the actors the terminal holds as frames,
+// the loop, the terminal background, freeze/resume, and the widget. Cell size 9x18 renders
+// at 2x, so 40 columns is a 720x144 backdrop.
 const piTui = await import(`${piRoot}/../pi-tui/dist/index.js`);
 const scene = await jiti.import("./lib/working-scene.ts");
+const backlit = await jiti.import("./lib/scene/backlit.ts");
+const { Canvas } = await jiti.import("./lib/scene/paint.ts");
 piTui.setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 piTui.setCellDimensions({ widthPx: 9, heightPx: 18 });
 assert.equal(scene.hushWorkingSceneSupported(), true, "Kitty terminals support the scene");
@@ -206,40 +208,148 @@ const cornerPixel = (png) => {
   const idat = png.indexOf("IDAT");
   return [...inflateSync(png.subarray(idat + 4, idat + 4 + png.readUInt32BE(idat - 4))).subarray(1, 4)];
 };
+/** The control strings of the Kitty commands in `data`, without payloads and without continuation chunks. */
+const commandsOf = (data) => [...data.matchAll(/\x1b_G([^;\x1b]*)/g)].map((match) => match[1]).filter((controls) => controls.includes("i="));
+const key = (controls, name) => Number(new RegExp(`(?:^|,)${name}=(\\d+)`).exec(controls)?.[1]);
+const kinds = (data) => commandsOf(data).map((controls) => controls.slice(0, 3));
+const LOOP = scene.HUSH_WORKING_SCENE_LOOP_TICKS;
+
 const band = scene.createHushWorkingSceneAnimation();
 assert.deepEqual(band.render(40), ["", "", "", ""], "until the terminal reports its background the band holds four empty rows");
-assert.equal(band.frameEdit(), undefined, "nothing is edited before the image exists");
+assert.equal(band.tick(), undefined, "nothing is shown before the band exists");
+assert.equal(band.ticks(), 0, "time stands still while nothing is shown");
 assert.equal(band.setBackground(BG), true, "a first background must be rendered");
 assert.equal(band.setBackground([...BG]), false, "the same background changes nothing");
 assert.equal(band.setBackground(undefined), false, "a later query without an answer keeps the known background");
 const bandLines = band.render(40);
 assert.equal(bandLines.length, scene.HUSH_WORKING_SCENE_ROWS, "the band is four rows");
-assert.match(bandLines[0], /^\x1b_Ga=T,f=100,q=2,C=1,c=40,r=4,i=\d+/, "the image fills the width over four rows without moving the cursor");
+assert.match(bandLines[0], /^\x1b_Ga=T,f=100,q=2,C=1,c=40,r=4,i=\d+/, "the backdrop fills the width over four rows without moving the cursor");
 assert.deepEqual(bandLines.slice(1), ["", "", ""], "the rows under the image stay empty, as in Pi's own Image component");
-assert.deepEqual(piTui.getPngDimensions(pngOf(bandLines[0]).toString("base64")), { widthPx: 720, heightPx: 144 }, "the frame is rendered at 2x for small cells");
+assert.deepEqual(piTui.getPngDimensions(pngOf(bandLines[0]).toString("base64")), { widthPx: 720, heightPx: 144 }, "the backdrop is rendered at 2x for small cells");
 assert.deepEqual(cornerPixel(pngOf(bandLines[0])), BG, "the scene is painted over the terminal background, so the band has no visible edge");
 assert.strictEqual(band.render(40), bandLines, "an unchanged size returns the same lines, so Pi redraws nothing");
-assert.equal(band.frameEdit(), undefined, "without a tick there is no frame edit");
+// After a redraw of the whole screen Pi places an image it knows by id alone, and Rex has freed it by then.
+const { getKittyImagePlacement } = await import(`${piRoot}/../pi-tui/dist/terminal-image.js`);
+assert.equal(getKittyImagePlacement(bandLines[0]), undefined, "Pi can place the backdrop only by writing the line that carries it");
+const backdropId = key(commandsOf(bandLines[0])[0], "i");
+
+const firstTick = band.tick();
+const transmitted = commandsOf(firstTick).filter((controls) => controls.startsWith("a=t,"));
+assert.equal(transmitted.length, backlit.BACKLIT_ACTORS.length, "the first tick sends each actor as an image of its own");
+assert.ok(transmitted.every((controls) => /^a=t,i=\d+,s=\d+,v=144,f=32,o=z,q=2,m=[01]$/.test(controls)), "an actor is as high as the band, compressed RGBA, and transmitted without a placement");
+const actorIds = transmitted.map((controls) => key(controls, "i"));
+const spriteWidths = transmitted.map((controls) => key(controls, "s"));
+assert.equal(new Set([backdropId, ...actorIds]).size, 3, "the backdrop and the actors are three images");
+const placed = commandsOf(firstTick).filter((controls) => controls.startsWith("a=p,"));
+assert.deepEqual(placed.map((controls) => key(controls, "i")), actorIds, "each actor is placed in the tick that sends it");
+assert.ok(placed.every((controls, layer) => new RegExp(`^a=p,i=\\d+,p=1,P=${backdropId},H=\\d+,X=\\d+,r=4,z=${layer + 1},C=1,q=2$`).test(controls)), "an actor stands relative to the backdrop, over four rows, EVE in front, and no cursor moves");
+assert.ok(!kinds(firstTick).includes("a=a"), "a new image shows its first frame unasked");
+const heldPose = band.tick();
+assert.deepEqual(kinds(heldPose), ["a=p", "a=p"], "while a pose lasts a tick only moves the actors");
+assert.ok(heldPose.length < 200, "moving the actors takes a few bytes");
 band.tick();
-const edit = band.frameEdit();
-assert.match(edit, /^\x1b_Ga=f,i=\d+,r=1,X=1,f=100,q=2,m=1;/, "a tick edits the placed image's root frame in place");
-assert.ok(edit.split("\x1b_G").slice(2).every((chunk) => /^a=f,m=[01];/.test(chunk)), "every continuation chunk of a frame edit repeats a=f, as the Kitty protocol requires");
-assert.equal(band.frameEdit(), undefined, "each frame is sent once");
-assert.notStrictEqual(band.render(60), bandLines, "a resize transmits a new image");
 band.tick();
-band.tick();
-assert.equal(band.ticks(), 3);
-band.restoreLastRendered();
-assert.equal(band.ticks(), 1, "freezing drops ticks that were never shown");
+const nextPose = band.tick();
+assert.deepEqual(kinds(nextPose), ["a=f", "a=a", "a=p", "a=f", "a=a", "a=p"], "a pose shown for the first time is sent as a frame, named and placed");
+assert.ok(nextPose.split("\x1b_G").slice(1).every((chunk) => /^a=[fap],/.test(chunk)), "every continuation chunk of frame data repeats a=f, as the Kitty protocol requires");
+commandsOf(nextPose).filter((controls) => controls.startsWith("a=f,")).forEach((controls, actor) => {
+  assert.match(controls, /^a=f,i=\d+,x=\d+,y=\d+,s=\d+,v=\d+,f=32,o=z,q=2,m=[01]$/, "a frame is a rectangle laid on a transparent frame");
+  assert.ok(key(controls, "s") < spriteWidths[actor], "a frame carries only the pixels the actor covers");
+});
+assert.deepEqual(commandsOf(nextPose).filter((controls) => controls.startsWith("a=a,")), actorIds.map((id) => `a=a,i=${id},c=2,q=2`), "the new pose is the image's second frame");
+
+// One loop sends every pose once. From then on the terminal holds the scene and a tick only names and places.
+while (band.ticks() < LOOP) band.tick();
+const heldLoop = [];
+for (let tick = 0; tick < LOOP; tick += 1) heldLoop.push(band.tick());
+assert.ok(heldLoop.every((commands) => !/a=[tTf],/.test(commands)), "a held loop sends no pixels");
+assert.ok(heldLoop.join("").length < LOOP * 200, "a held loop costs a few bytes per tick");
+assert.equal(Math.max(...heldLoop.flatMap((commands) => commandsOf(commands).filter((controls) => controls.startsWith("a=a,")).map((controls) => key(controls, "c")))), 240, "an actor holds twelve poses per second of the loop");
+assert.deepEqual(commandsOf(heldLoop[4]).filter((controls) => controls.startsWith("a=a,")), actorIds.map((id) => `a=a,i=${id},c=2,q=2`), "the loop names the frames it sent the first time round");
+for (const commands of heldLoop) {
+  commandsOf(commands).filter((controls) => controls.startsWith("a=p,")).forEach((controls, actor) => {
+    // Canvas pixels: a column is 18 wide, and X counts the 9 points of a cell.
+    const left = key(controls, "H") * 18 + key(controls, "X") * 2;
+    assert.ok(key(controls, "X") < 9 && left + spriteWidths[actor] <= 720, "an actor never leaves the backdrop, and its offset stays inside a cell");
+  });
+}
+const secondHeldLoop = [];
+for (let tick = 0; tick < 12; tick += 1) secondHeldLoop.push(band.tick());
+assert.deepEqual(secondHeldLoop, heldLoop.slice(0, 12), "the scene repeats exactly after one loop");
+
+band.forgetActors();
+assert.deepEqual(kinds(band.tick()), ["a=t", "a=p", "a=t", "a=p"], "actors the terminal freed are sent again on the next tick");
+const frozenAt = band.ticks();
+assert.deepEqual(commandsOf(band.release()), [backdropId, ...actorIds].map((id) => `a=d,d=I,i=${id},q=2`), "freezing deletes every image of the scene");
+assert.equal(band.tick(), undefined, "a frozen scene shows nothing");
+assert.equal(band.ticks(), frozenAt, "and keeps its time");
+const resumedLines = band.render(40);
+assert.notStrictEqual(resumedLines, bandLines, "the next working period sends the band afresh");
+assert.deepEqual(resumedLines, bandLines, "with the same backdrop");
+assert.deepEqual(kinds(band.tick()), ["a=t", "a=p", "a=t", "a=p"], "and the actors with it");
+assert.equal(band.ticks(), frozenAt + 1, "resuming from the tick it froze at");
+assert.notStrictEqual(band.render(60), resumedLines, "a resize transmits a new backdrop");
+assert.deepEqual(kinds(band.tick()), ["a=t", "a=p", "a=t", "a=p"], "and new actors, since the poses belong to the old size");
+band.render(40);
 const twin = scene.createHushWorkingSceneAnimation();
 twin.setBackground(BG);
-twin.tick();
-const anonymous = (lines) => lines.map((line) => line.replace(/i=\d+/g, "i=ID"));
-assert.deepEqual(anonymous(band.render(40)), anonymous(twin.render(40)), "equal ticks render identical frames");
+twin.render(40);
+while (twin.ticks() < band.ticks()) twin.tick();
+const anonymous = (commands) => commands.replace(/([iP])=\d+/g, "$1=ID");
+assert.deepEqual(anonymous(twin.render(40)[0]), anonymous(band.render(40)[0]), "equal sizes render identical backdrops");
+twin.forgetActors();
+assert.equal(anonymous(twin.tick()), anonymous(band.tick()), "equal ticks show identical actors");
 assert.equal(band.setBackground([250, 244, 237]), true, "a new terminal background must be rendered");
-assert.deepEqual(cornerPixel(pngOf(band.render(40)[0])), [250, 244, 237], "a new background repaints the scene over it");
+assert.deepEqual(cornerPixel(pngOf(band.render(40)[0])), [250, 244, 237], "a new background repaints the backdrop over it");
 band.reset();
 assert.equal(band.ticks(), 0, "reset restarts the scene");
+
+// A terminal refuses frames beyond a storage limit, so tall cells hold each pose longer.
+piTui.setCellDimensions({ widthPx: 40, heightPx: 120 });
+const tall = scene.createHushWorkingSceneAnimation();
+tall.setBackground(BG);
+tall.render(40);
+let tallFrames = "";
+for (let tick = 0; tick < 20; tick += 1) tallFrames += tall.tick();
+assert.equal(commandsOf(tallFrames).filter((controls) => controls.startsWith("a=f,")).length, 2 * backlit.BACKLIT_ACTORS.length, "sprites too large for twelve poses per second hold six");
+piTui.setCellDimensions({ widthPx: 9, heightPx: 18 });
+
+// The scene itself: layers compose to the picture, nothing leaves a sprite, and every motion closes the loop.
+for (const actor of backlit.BACKLIT_ACTORS) {
+  const width = backlit.backlitSpriteWidth(actor, 144);
+  const sprite = new Canvas(width, 144, true);
+  const other = new Canvas(width, 144, true);
+  for (let pose = 0; pose < 240; pose += 1) {
+    sprite.clear();
+    backlit.paintBacklitActor(sprite, actor, pose / 12, 720, 144);
+    const covered = sprite.coveredRect();
+    assert.ok(covered && covered.x > 0 && covered.x + covered.width < width, `${actor} stays inside its sprite at every pose`);
+  }
+  for (const t of [0, 0.05, 7.3]) {
+    sprite.clear();
+    other.clear();
+    backlit.paintBacklitActor(sprite, actor, t, 720, 144);
+    backlit.paintBacklitActor(other, actor, t + backlit.BACKLIT_PERIOD_S, 720, 144);
+    assert.ok(Buffer.from(sprite.data).equals(Buffer.from(other.data)), `${actor}'s pose repeats exactly one loop later`);
+    assert.ok(Math.abs(backlit.backlitActorX(actor, t, 720, 144) - backlit.backlitActorX(actor, t + backlit.BACKLIT_PERIOD_S, 720, 144)) < 1e-6, `${actor} stands where it stood one loop earlier`);
+  }
+  // Painting on the terminal background directly, against the sprite laid over it as the terminal does.
+  const direct = new Canvas(width, 144);
+  direct.vgrad(0, 144, [[0, BG], [1, BG]]);
+  backlit.paintBacklitActor(direct, actor, 8.6, 720, 144);
+  sprite.clear();
+  backlit.paintBacklitActor(sprite, actor, 8.6, 720, 144);
+  const rgba = sprite.toRGBA({ x: 0, y: 0, width, height: 144 });
+  let worst = 0;
+  for (let pixel = 0; pixel < width * 144; pixel += 1) {
+    const alpha = rgba[pixel * 4 + 3] / 255;
+    for (let channel = 0; channel < 3; channel += 1) {
+      worst = Math.max(worst, Math.abs(rgba[pixel * 4 + channel] * alpha + BG[channel] * (1 - alpha) - direct.data[pixel * 3 + channel]));
+    }
+  }
+  assert.ok(worst <= 2, `${actor}'s sprite over the backdrop is the actor painted on the backdrop (off by ${worst})`);
+}
+
 piTui.setCapabilities({ images: null, trueColor: true, hyperlinks: true });
 assert.equal(scene.hushWorkingSceneSupported(), false, "without Kitty graphics the scene is not offered");
 const textOnly = scene.createHushWorkingSceneAnimation();
@@ -249,23 +359,37 @@ piTui.setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 const terminalWrites = [];
 let renderRequests = 0;
 const fakeTui = (reply) => ({
+  fullRedraws: 0,
   requestRender() { renderRequests += 1; },
   queryTerminalColors: async () => reply,
   terminal: { write(data) { terminalWrites.push(data); } },
 });
+const ticksElapsed = (count) => new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * count));
 const widgetAnimation = scene.createHushWorkingSceneAnimation();
-const widget = scene.createHushWorkingSceneWidget(fakeTui({ background: { r: 35, g: 33, b: 54 } }), widgetAnimation);
+const widgetTui = fakeTui({ background: { r: 35, g: 33, b: 54 } });
+const widget = scene.createHushWorkingSceneWidget(widgetTui, widgetAnimation);
 assert.deepEqual(widget.render(40), ["", "", "", ""], "a first widget waits for the terminal background");
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(renderRequests, 1, "the reported background requests one Pi render");
 assert.deepEqual(cornerPixel(pngOf(widget.render(40)[0])), BG, "the widget paints over the reported background");
-await new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * 2.5));
+await ticksElapsed(6);
+assert.deepEqual(kinds(terminalWrites[0]), ["a=t", "a=p", "a=t", "a=p"], "the first tick writes the actors straight to the terminal");
+assert.ok(terminalWrites.length >= 2 && terminalWrites.every((data) => data.startsWith("\x1b_Ga=")), "ticks write only Kitty commands");
+assert.equal(renderRequests, 1, "ticks never request a Pi render");
+// Pi redraws the whole screen: the display is erased, and in Rex every image with it.
+terminalWrites.length = 0;
+widgetTui.fullRedraws += 1;
+await ticksElapsed(6);
+assert.deepEqual(kinds(terminalWrites[0]), ["a=t", "a=p", "a=t", "a=p"], "after Pi redraws the whole screen the next tick sends the actors again");
+assert.ok(terminalWrites.slice(1).every((data) => !data.includes("a=t,")), "once");
+assert.equal(renderRequests, 1, "the backdrop needs no render of its own: Pi's redraw carried its line");
+terminalWrites.length = 0;
 widget.dispose();
 const shownTicks = widgetAnimation.ticks();
-assert.ok(terminalWrites.length >= 1 && terminalWrites.every((data) => data.startsWith("\x1b_Ga=f,")), "ticks write frame edits straight to the terminal");
-assert.equal(renderRequests, 1, "ticks never request a Pi render");
-await new Promise((resolve) => setTimeout(resolve, scene.HUSH_WORKING_SCENE_TICK_MS * 2));
+assert.deepEqual(kinds(terminalWrites.join("")), ["a=d", "a=d", "a=d"], "dispose leaves no image in the terminal");
+await ticksElapsed(4);
 assert.equal(widgetAnimation.ticks(), shownTicks, "dispose stops the clock");
+assert.equal(terminalWrites.length, 1, "and the writes");
 assert.deepEqual(widget.render(40), [], "a disposed widget renders nothing");
 const again = scene.createHushWorkingSceneWidget(fakeTui({ background: { r: 35, g: 33, b: 54 } }), widgetAnimation);
 assert.match(again.render(40)[0], /^\x1b_Ga=T,/, "the next working period draws at once with the known background");
@@ -281,6 +405,7 @@ silentWidget.dispose();
 const deferredTui = () => {
   const query = {};
   const tui = {
+    fullRedraws: 0,
     requestRender() { renderRequests += 1; },
     queryTerminalColors({ onLateReply }) {
       query.late = onLateReply;
@@ -315,8 +440,7 @@ for (const resetBetween of [false, true]) {
   retired.query.answer({ background: { r: 0, g: 0, b: 0 } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(activeWidget.render(40), activeLines, "a retired widget's answer leaves the active widget's image alone");
-  shared.tick();
-  assert.match(shared.frameEdit(), /^\x1b_Ga=f,/, "the active widget keeps animating after a retired widget's answer");
+  assert.match(shared.tick(), /^\x1b_Ga=t,/, "the active widget keeps animating after a retired widget's answer");
   active.query.answer({ background: { r: 0, g: 0, b: 0 } });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(renderRequests, 1, "the active widget's own answer requests the render for the new background");

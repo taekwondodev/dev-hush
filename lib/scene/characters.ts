@@ -32,6 +32,9 @@ const EVE_EYE: Rgb = [96, 214, 255];
 const THRUSTER: Rgb = [130, 205, 255];
 const THRUSTER_GLOW = 0.6;
 
+/** Distance in local units over which WALL-E's body bobs once. */
+export const WALL_E_BOB_LENGTH = 14;
+
 const wrap = (v: number, span: number): number => ((v % span) + span) % span;
 
 export type WallEPose = {
@@ -73,7 +76,7 @@ export function drawWallE(p: Painter, { x, y, s, facing = 1, squash = 1, travel 
     p.circle(wx, -9, 1.8, HUB);
   }
 
-  p.translate(0, Math.sin(travel * 0.45) * 0.7);
+  p.translate(0, Math.sin((2 * Math.PI * travel) / WALL_E_BOB_LENGTH) * 0.7);
 
   // Back arm, behind the body and the boot.
   p.capsule(8, -46, 30, -50, 2.4, METAL_DARK);

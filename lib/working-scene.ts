@@ -5,54 +5,91 @@
 //
 // Hush replaces Pi's stock working row with a four-row Kitty-graphics scene (see
 // ./scene/backlit.ts) while one logical agent run is active. This module owns the
-// deterministic tick clock, the session-scoped freeze/resume state, the band lines
-// Pi renders, the in-place frame updates, and the temporary TUI widget. ../index.ts
+// deterministic tick clock, the session-scoped freeze/resume state, the band lines Pi
+// renders, the commands that animate the band, and the temporary TUI widget. ../index.ts
 // owns when the presentation is installed and removed, and stays the sole caller of
 // setWorkingVisible().
 //
-// Transport: Pi's alternate-screen renderer retransmits an image and re-places every
-// visible image whenever an image row changes. To keep the renderer out of the
-// per-frame path, render(width) returns the same lines for a given size and background:
-// one Kitty transmit of the first frame under a stable image id, then empty rows, as
-// Pi's own Image component does. Every tick then edits that image's root frame in place
-// (Kitty animation `a=f`, verified in Rex), written straight to the terminal, so no row
-// changes and nothing else is redrawn.
+// Transport: the terminal holds the scene and Hush only names what to show, as dev's
+// ADR 0008 does for a settled loop. The whole band cannot be that loop: a terminal stores
+// every animation frame as a full bitmap (Rex refuses more than 128 MiB per image), and
+// the loop is twenty seconds of a band as wide as the terminal. So the band is layers:
+// - The backdrop is one opaque image in the band's first line, which Pi places. The lines
+//   depend only on the size and the background, so Pi's renderer stays out of the
+//   per-frame path.
+// - Each actor is a small transparent image whose frames are its poses, twelve per second
+//   of the loop. A pose is painted and sent the first time it is shown, as a new frame
+//   holding only the pixels the actor covers; after one loop nothing is painted any more.
+// - Every tick names each actor's frame when the pose changes (`a=a`) and puts the actor
+//   at its x relative to the backdrop (`a=p` with `P`, `H`, `X`), written straight to the
+//   terminal. A relative placement needs no cursor, and the terminal moves the image
+//   without Pi redrawing anything.
 //
-// Background: the scene is painted over the terminal's own background so the band has
+// What the terminal holds is never taken for granted across a redraw by Pi:
+// - Pi may repeat the backdrop line at any time, so the line always carries the image. It
+//   is built here rather than with renderImage(), whose images Pi places again by id
+//   alone after a redraw of the whole screen. That redraw erases the display, and Rex
+//   frees every image with it, so the id alone would place nothing.
+// - The same redraw frees the actors. The widget watches TUI.fullRedraws and sends them
+//   again. A lesser redraw only removes the placements, which the next tick restores.
+//
+// Background: the backdrop is painted over the terminal's own background so the band has
 // no visible edge. Each new widget asks the terminal for it through Pi's public
 // TUI.queryTerminalColors() and keeps the answer for later working periods; until the
 // first answer arrives the band is four empty rows. A changed answer requests one Pi
 // render, the only render the widget ever requests.
 //
-// Continuity: one extension-owned animation instance survives hide/show within the
-// same Pi process and Hush extension lifetime. Disposing the widget drops ticks that
-// were never shown and forgets the placement, so the next working period transmits
-// the frozen frame afresh and resumes from it. A fresh session calls reset(). Time is
-// tick-driven, never wall-clock, so tests can seek it exactly. A resize or a new cell
-// size simply re-renders the current tick at the new size: positions are proportional
-// to the canvas, so no clamp step exists.
+// Continuity: one extension-owned animation instance survives hide/show within the same
+// Pi process and Hush extension lifetime. Disposing the widget deletes the images, so a
+// hidden scene leaves nothing in the terminal, and the next working period resumes from
+// the tick it froze at. A fresh session calls reset(). Time is tick-driven, never
+// wall-clock, so tests can seek it exactly, and it stands still while no band is placed.
+// A resize or a new cell size re-renders the current tick at the new size: positions are
+// proportional to the canvas.
 //
-// Verified against Pi 1.5.0: ExtensionUIContext.setWidget() with a component factory,
-// per-widget dispose(), TUI.terminal.write(), TUI.queryTerminalColors(), and renderImage() producing exactly
-// `width` columns by HUSH_WORKING_SCENE_ROWS rows for a canvas sized from the cell
-// dimensions Pi learned from the terminal.
+// Verified against Pi 1.5.2 and Rex 0.1.0-preview.20: ExtensionUIContext.setWidget() with a
+// component factory, per-widget dispose(), TUI.terminal.write(), TUI.fullRedraws,
+// TUI.queryTerminalColors(), encodeKitty(), and in Rex relative placements, frames added
+// to an image that was transmitted without a placement, and the frame limit above.
+import { deflateSync } from "node:zlib";
 import {
   type Component,
   type TUI,
   type TerminalColors,
   allocateImageId,
+  encodeKitty,
   getCapabilities,
   getCellDimensions,
-  renderImage,
 } from "@earendil-works/pi-tui";
-import { paintBacklitBackdrop, renderBacklit } from "./scene/backlit.ts";
+import {
+  BACKLIT_ACTORS,
+  BACKLIT_PERIOD_S,
+  type BacklitActor,
+  backlitActorX,
+  backlitSpriteWidth,
+  paintBacklitActor,
+  paintBacklitBackdrop,
+} from "./scene/backlit.ts";
 import { Canvas, type Rgb } from "./scene/paint.ts";
 
 export const HUSH_WORKING_SCENE_WIDGET_KEY = "dev-hush-working-scene";
 /** Band height in terminal rows. */
 export const HUSH_WORKING_SCENE_ROWS = 4;
-/** Scheduler period: 12 frames per second. Scene time derives from ticks, so this only changes smoothness. */
-export const HUSH_WORKING_SCENE_TICK_MS = 83;
+/** Positions shown per second. Scene time derives from ticks, so this only changes smoothness. */
+const TICKS_PER_SECOND = 60;
+/** Scheduler period. */
+export const HUSH_WORKING_SCENE_TICK_MS = Math.round(1000 / TICKS_PER_SECOND);
+/** Ticks after which the scene repeats. */
+export const HUSH_WORKING_SCENE_LOOP_TICKS = BACKLIT_PERIOD_S * TICKS_PER_SECOND;
+/** Ticks an actor holds one pose: twelve poses per second. */
+const TICKS_PER_POSE = TICKS_PER_SECOND / 12;
+/**
+ * Most bytes of frames one actor may ask the terminal to hold, a frame counted as the
+ * terminal stores it: the whole sprite at four bytes per pixel. Rex refuses frames beyond
+ * 128 MiB per image and then shows a stale pose, so a sprite too large for a loop of
+ * poses holds each pose longer instead.
+ */
+const FRAME_STORAGE_BUDGET = 96 * 1024 * 1024;
 
 const KITTY_CHUNK = 4096;
 /** How long a new widget waits for the terminal's colours before painting over FALLBACK_BACKGROUND. */
@@ -69,131 +106,178 @@ export type HushWorkingSceneAnimation = {
    * rendered again.
    */
   setBackground(reported: Rgb | undefined): boolean;
-  /** Advance one scheduler tick. */
-  tick(): void;
-  /** Kitty command that updates the placed image to the current tick, or undefined when there is nothing to update. */
-  frameEdit(): string | undefined;
-  /** Freeze: drop ticks never shown and forget the placement so the next render transmits afresh. */
-  restoreLastRendered(): void;
+  /**
+   * Advance one scheduler tick and return the Kitty commands that show it: poses not sent
+   * yet, the frame each actor shows and where each stands. Undefined while no band is
+   * rendered, and time then stands still.
+   */
+  tick(): string | undefined;
+  /** The terminal freed every image and the backdrop was sent again: send the actors again too. */
+  forgetActors(): void;
+  /** Freeze: the Kitty commands that delete the scene's images. The next render sends the band afresh. */
+  release(): string;
   /** Restore t = 0 for a new session. */
   reset(): void;
   /** Current tick count, exposed for deterministic assertions. */
   ticks(): number;
 };
 
-type Geometry = { widthPx: number; heightPx: number };
-type Placement = Geometry & { width: number; lines: string[] };
+/** The backdrop as rendered: its size in columns and in canvas pixels, and the lines Pi places it with. */
+type Band = { width: number; widthPx: number; heightPx: number; pxPerPoint: number; lines: string[] };
+/** One actor's image: `frames` maps each pose the terminal holds to its frame number, `shown` is the frame it displays. */
+type Sprite = {
+  actor: BacklitActor;
+  id: number;
+  canvas: Canvas;
+  ticksPerPose: number;
+  frames: Map<number, number>;
+  shown: number | undefined;
+};
 
 /** True when Pi detected a Kitty-graphics terminal. Hush has no text fallback for the scene. */
 export function hushWorkingSceneSupported(): boolean {
   return getCapabilities().images === "kitty";
 }
 
-/** Retina terminals usually report logical points, so render at 2x below 24 px cells. */
-function geometry(width: number): Geometry {
-  const cell = getCellDimensions();
-  const k = cell.heightPx < 24 ? 2 : 1;
-  return {
-    widthPx: width * cell.widthPx * k,
-    heightPx: HUSH_WORKING_SCENE_ROWS * cell.heightPx * k,
-  };
-}
+const kitty = (controls: string): string => `\u001b_G${controls}\u001b\\`;
 
 /**
- * One Kitty animation-frame command carrying `base64`, chunked as the protocol requires:
- * continuation chunks of frame data must repeat `a=f`.
+ * One Kitty command carrying `pixels` as compressed RGBA, chunked as the protocol requires.
+ * `continuation` opens every chunk after the first: frame data must repeat `a=f,` there.
  */
-function kittyFrameCommand(controls: string, base64: string): string {
+function kittyPixels(controls: string, continuation: string, pixels: Buffer): string {
+  const base64 = deflateSync(pixels, { level: 1 }).toString("base64");
   let sequence = "";
   for (let offset = 0; offset < base64.length; offset += KITTY_CHUNK) {
     const more = offset + KITTY_CHUNK < base64.length ? 1 : 0;
-    const head = offset === 0 ? `a=f,${controls},m=${more}` : `a=f,m=${more}`;
+    const head = offset === 0 ? `${controls},f=32,o=z,q=2,m=${more}` : `${continuation}m=${more}`;
     sequence += `\u001b_G${head};${base64.slice(offset, offset + KITTY_CHUNK)}\u001b\\`;
   }
   return sequence;
 }
 
+/** How long each pose is held so that a loop of poses of `sprite` fits FRAME_STORAGE_BUDGET. */
+function ticksPerPose(sprite: Canvas): number {
+  const frameBytes = sprite.width * sprite.height * 4;
+  let ticks = TICKS_PER_POSE;
+  while (Math.ceil(HUSH_WORKING_SCENE_LOOP_TICKS / ticks) * frameBytes > FRAME_STORAGE_BUDGET) ticks *= 2;
+  return ticks;
+}
+
 export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
-  const imageId = allocateImageId();
+  const backdropId = allocateImageId();
+  const actorIds = BACKLIT_ACTORS.map(() => allocateImageId());
   let ticks = 0;
-  let shownTicks = 0;
-  let placement: Placement | undefined;
   let background: Rgb | undefined;
-  let backdrop: Canvas | undefined;
-  let frame: Canvas | undefined;
+  let band: Band | undefined;
+  let sprites: Sprite[] = [];
 
-  const seconds = (): number => (ticks * HUSH_WORKING_SCENE_TICK_MS) / 1000;
+  /** Retina terminals usually report logical points, so render at 2x below 24 px cells. */
+  const renderBand = (width: number, bg: Rgb): Band => {
+    const cell = getCellDimensions();
+    const pxPerPoint = cell.heightPx < 24 ? 2 : 1;
+    const widthPx = width * cell.widthPx * pxPerPoint;
+    const heightPx = HUSH_WORKING_SCENE_ROWS * cell.heightPx * pxPerPoint;
+    if (band && band.width === width && band.widthPx === widthPx && band.heightPx === heightPx) return band;
+    const backdrop = new Canvas(widthPx, heightPx);
+    paintBacklitBackdrop(backdrop, bg);
+    const image = encodeKitty(backdrop.toPNG(6).toString("base64"), {
+      columns: width,
+      rows: HUSH_WORKING_SCENE_ROWS,
+      imageId: backdropId,
+      moveCursor: false,
+    });
+    const lines = [image];
+    for (let row = 1; row < HUSH_WORKING_SCENE_ROWS; row += 1) lines.push("");
+    // A new backdrop replaces the image the actors were placed on, and their poses belong to the old size.
+    sprites = BACKLIT_ACTORS.map((actor, index) => {
+      const canvas = new Canvas(backlitSpriteWidth(actor, heightPx), heightPx, true);
+      return { actor, id: actorIds[index]!, canvas, ticksPerPose: ticksPerPose(canvas), frames: new Map(), shown: undefined };
+    });
+    return { width, widthPx, heightPx, pxPerPoint, lines };
+  };
 
-  const paintFrame = ({ widthPx, heightPx }: Geometry, bg: Rgb): string => {
-    if (!backdrop || !frame || backdrop.width !== widthPx || backdrop.height !== heightPx) {
-      backdrop = new Canvas(widthPx, heightPx);
-      paintBacklitBackdrop(backdrop, bg);
-      frame = new Canvas(widthPx, heightPx);
+  /** The commands that make `sprite` show the loop's `tick` on `on`. */
+  const show = (sprite: Sprite, tick: number, on: Band, layer: number): string => {
+    const { actor, id, canvas, frames } = sprite;
+    const pose = Math.floor(tick / sprite.ticksPerPose);
+    let commands = "";
+    let frame = frames.get(pose);
+    if (frame === undefined) {
+      canvas.clear();
+      paintBacklitActor(canvas, actor, (pose * sprite.ticksPerPose) / TICKS_PER_SECOND, on.widthPx, on.heightPx);
+      frame = frames.size + 1;
+      frames.set(pose, frame);
+      if (frame === 1) {
+        // The image itself is the first frame, and the one a new image shows.
+        const whole = { x: 0, y: 0, width: canvas.width, height: canvas.height };
+        commands += kittyPixels(`a=t,i=${id},s=${canvas.width},v=${canvas.height}`, "", canvas.toRGBA(whole));
+        sprite.shown = 1;
+      } else {
+        // A new frame starts transparent, so only the pixels the actor covers are sent.
+        const covered = canvas.coveredRect() ?? { x: 0, y: 0, width: 1, height: 1 };
+        commands += kittyPixels(
+          `a=f,i=${id},x=${covered.x},y=${covered.y},s=${covered.width},v=${covered.height}`,
+          "a=f,",
+          canvas.toRGBA(covered),
+        );
+      }
     }
-    renderBacklit(frame, seconds(), backdrop);
-    return frame.toPNG(1).toString("base64");
+    if (sprite.shown !== frame) {
+      commands += kitty(`a=a,i=${id},c=${frame},q=2`);
+      sprite.shown = frame;
+    }
+    // Where the sprite's left edge stands, as whole cells from the backdrop's and pixels into the next.
+    const left = Math.round(backlitActorX(actor, tick / TICKS_PER_SECOND, on.widthPx, on.heightPx) - canvas.width / 2);
+    const cellPx = on.widthPx / on.width;
+    const column = Math.floor(left / cellPx);
+    const offset = Math.floor((left - column * cellPx) / on.pxPerPoint);
+    return `${commands}${kitty(`a=p,i=${id},p=1,P=${backdropId},H=${column},X=${offset},r=${HUSH_WORKING_SCENE_ROWS},z=${layer},C=1,q=2`)}`;
   };
 
   return {
     ticks: () => ticks,
 
-    tick(): void {
+    tick(): string | undefined {
+      const on = band;
+      if (!on) return undefined;
       ticks += 1;
+      const tick = ticks % HUSH_WORKING_SCENE_LOOP_TICKS;
+      return sprites.map((sprite, index) => show(sprite, tick, on, index + 1)).join("");
     },
 
     setBackground(reported: Rgb | undefined): boolean {
       const next = reported ?? background ?? FALLBACK_BACKGROUND;
       if (background && background.every((v, i) => v === next[i])) return false;
       background = next;
-      // Both the cached backdrop and the transmitted image carry the old background.
-      backdrop = undefined;
-      placement = undefined;
+      // The rendered backdrop carries the old background.
+      band = undefined;
       return true;
+    },
+
+    forgetActors(): void {
+      for (const sprite of sprites) {
+        sprite.frames.clear();
+        sprite.shown = undefined;
+      }
+    },
+
+    release(): string {
+      band = undefined;
+      sprites = [];
+      return [backdropId, ...actorIds].map((id) => kitty(`a=d,d=I,i=${id},q=2`)).join("");
     },
 
     reset(): void {
       ticks = 0;
-      shownTicks = 0;
-      placement = undefined;
-    },
-
-    restoreLastRendered(): void {
-      ticks = shownTicks;
-      placement = undefined;
     },
 
     render(width: number): string[] {
-      if (width < 2) return [];
+      if (width < 2 || !hushWorkingSceneSupported()) return [];
       // Hold the band's place until the terminal reports its background.
       if (!background) return Array.from({ length: HUSH_WORKING_SCENE_ROWS }, () => "");
-      const size = geometry(width);
-      const current =
-        placement &&
-        placement.width === width &&
-        placement.widthPx === size.widthPx &&
-        placement.heightPx === size.heightPx;
-      if (!current) {
-        const image = renderImage(paintFrame(size, background), { widthPx: size.widthPx, heightPx: size.heightPx }, {
-          maxWidthCells: width,
-          maxHeightCells: HUSH_WORKING_SCENE_ROWS,
-          imageId,
-          moveCursor: false,
-        });
-        if (!image) return [];
-        const lines = [image.sequence];
-        for (let row = 1; row < HUSH_WORKING_SCENE_ROWS; row += 1) lines.push("");
-        placement = { ...size, width, lines };
-        shownTicks = ticks;
-      }
-      return placement!.lines;
-    },
-
-    frameEdit(): string | undefined {
-      if (!placement || !background || shownTicks === ticks) return undefined;
-      const png = paintFrame(placement, background);
-      shownTicks = ticks;
-      // Replace the root frame's pixels; the terminal repaints the placement in place.
-      return kittyFrameCommand(`i=${imageId},r=1,X=1,f=100,q=2`, png);
+      band = renderBand(width, background);
+      return band.lines;
     },
   };
 }
@@ -202,7 +286,7 @@ export function createHushWorkingSceneAnimation(): HushWorkingSceneAnimation {
  * Build the temporary Hush working widget bound to one caller-owned animation.
  * Pi disposes the previous component before installing a replacement under the same
  * key and when it clears extension widgets, so the scheduler cannot outlive the widget
- * or duplicate. Ticks never request a Pi render: they write the frame edit directly,
+ * or duplicate. Ticks never request a Pi render: they write their commands directly,
  * and the band lines stay unchanged until a resize or a new terminal background.
  */
 export function createHushWorkingSceneWidget(
@@ -210,11 +294,15 @@ export function createHushWorkingSceneWidget(
   animation: HushWorkingSceneAnimation = createHushWorkingSceneAnimation(),
 ): Component & { dispose(): void } {
   let disposed = false;
+  let fullRedraws = tui.fullRedraws;
   const timer = setInterval(() => {
     if (disposed) return;
-    animation.tick();
-    const edit = animation.frameEdit();
-    if (edit) tui.terminal.write(edit);
+    if (tui.fullRedraws !== fullRedraws) {
+      fullRedraws = tui.fullRedraws;
+      animation.forgetActors();
+    }
+    const commands = animation.tick();
+    if (commands) tui.terminal.write(commands);
   }, HUSH_WORKING_SCENE_TICK_MS);
   // The animation must never keep Pi's process alive on its own.
   timer.unref?.();
@@ -234,7 +322,7 @@ export function createHushWorkingSceneWidget(
       if (disposed) return;
       disposed = true;
       clearInterval(timer);
-      animation.restoreLastRendered();
+      tui.terminal.write(animation.release());
     },
   };
 }

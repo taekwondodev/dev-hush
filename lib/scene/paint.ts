@@ -1,8 +1,9 @@
 // dev-hush - raster painter for the working scene.
 //
-// An opaque RGB canvas, an affine painter that fills signed distance fields with
-// analytic anti-aliasing, and a minimal PNG encoder for the Kitty graphics
-// protocol. Node built-ins only (zlib), so the extension adds no dependency.
+// An RGB canvas, opaque or with coverage, an affine painter that fills signed distance
+// fields with analytic anti-aliasing, and the two encodings the Kitty graphics protocol
+// takes from it: PNG and raw RGBA. Node built-ins only (zlib), so the extension adds no
+// dependency.
 import { crc32, deflateSync } from "node:zlib";
 
 export type Rgb = readonly [number, number, number];
@@ -27,15 +28,74 @@ export const hash = (n: number): number => {
   return s - Math.floor(s);
 };
 
+/** A pixel rectangle inside a canvas. */
+export type Rect = { x: number; y: number; width: number; height: number };
+
 export class Canvas {
   readonly width: number;
   readonly height: number;
   readonly data: Uint8ClampedArray;
+  /**
+   * Coverage per pixel, 0..255, on a transparent canvas; null on an opaque one. A transparent
+   * canvas starts empty and holds `data` premultiplied, so painting on it and laying the
+   * result over a backdrop equals painting on the backdrop.
+   */
+  readonly alpha: Uint8ClampedArray | null;
 
-  constructor(width: number, height: number) {
+  constructor(width: number, height: number, transparent = false) {
     this.width = width;
     this.height = height;
     this.data = new Uint8ClampedArray(width * height * 3);
+    this.alpha = transparent ? new Uint8ClampedArray(width * height) : null;
+  }
+
+  /** Empty a transparent canvas. */
+  clear(): void {
+    this.data.fill(0);
+    this.alpha?.fill(0);
+  }
+
+  /** The smallest rectangle holding every covered pixel of a transparent canvas, if any. */
+  coveredRect(): Rect | undefined {
+    const { width, height, alpha } = this;
+    if (!alpha) return { x: 0, y: 0, width, height };
+    let left = width;
+    let right = -1;
+    let top = height;
+    let bottom = -1;
+    for (let y = 0; y < height; y += 1) {
+      const row = y * width;
+      let first = 0;
+      while (first < width && alpha[row + first] === 0) first += 1;
+      if (first === width) continue;
+      let last = width - 1;
+      while (alpha[row + last] === 0) last -= 1;
+      if (first < left) left = first;
+      if (last > right) right = last;
+      if (top === height) top = y;
+      bottom = y;
+    }
+    return right < 0 ? undefined : { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
+  }
+
+  /** `rect` as RGBA bytes with straight alpha, the Kitty protocol's f=32. */
+  toRGBA({ x, y, width, height }: Rect): Buffer {
+    const { data, alpha } = this;
+    const out = Buffer.alloc(width * height * 4);
+    for (let row = 0; row < height; row += 1) {
+      let from = (y + row) * this.width + x;
+      let to = row * width * 4;
+      for (let column = 0; column < width; column += 1, from += 1, to += 4) {
+        const a = alpha ? alpha[from]! : 255;
+        if (a === 0) continue;
+        const scale = 255 / a;
+        out[to] = Math.min(255, Math.round(data[from * 3]! * scale));
+        out[to + 1] = Math.min(255, Math.round(data[from * 3 + 1]! * scale));
+        out[to + 2] = Math.min(255, Math.round(data[from * 3 + 2]! * scale));
+        out[to + 3] = a;
+      }
+    }
+    return out;
   }
 
   /** Opaque vertical gradient over rows [y0, y1). Stops are [position 0..1, rgb]. */
@@ -56,11 +116,6 @@ export class Canvas {
         this.data[o + 2] = b;
       }
     }
-  }
-
-  /** Replace every pixel with `source`, which must have the same size. */
-  copyFrom(source: Canvas): void {
-    this.data.set(source.data);
   }
 
   toPNG(level = 3): Buffer {
@@ -194,7 +249,7 @@ export class Painter {
     const pad = soft * scale + 1.5;
     const xs = [a * x0 + c * y0 + e, a * x1 + c * y0 + e, a * x0 + c * y1 + e, a * x1 + c * y1 + e];
     const ys = [b * x0 + d * y0 + f, b * x1 + d * y0 + f, b * x0 + d * y1 + f, b * x1 + d * y1 + f];
-    const { width, height, data } = this.c;
+    const { width, height, data, alpha: coverage } = this.c;
     const px0 = clamp(Math.floor(Math.min(...xs) - pad), 0, width);
     const px1 = clamp(Math.ceil(Math.max(...xs) + pad), 0, width);
     const py0 = clamp(Math.floor(Math.min(...ys) - pad), 0, height);
@@ -223,6 +278,7 @@ export class Painter {
         data[o] = data[o]! + (r - data[o]!) * k;
         data[o + 1] = data[o + 1]! + (g - data[o + 1]!) * k;
         data[o + 2] = data[o + 2]! + (bl - data[o + 2]!) * k;
+        if (coverage) coverage[o / 3] = coverage[o / 3]! + (255 - coverage[o / 3]!) * k;
       }
     }
   }

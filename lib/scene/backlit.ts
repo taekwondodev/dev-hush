@@ -4,9 +4,14 @@
 // horizon glows only near it. WALL-E chases EVE as dark silhouettes whose sun-facing edge
 // catches a warm rim, brighter the closer they are to the sun; only the seedling and EVE's
 // eyes keep their colour. They ping-pong across the band; at each end EVE turns first and
-// hops over WALL-E. Everything is painted over `bg`, the terminal background, so the band
-// has no visible edge.
-import { drawEve, drawWallE } from "./characters.ts";
+// hops over WALL-E.
+//
+// The scene comes in layers, so that the terminal can hold it (see ../working-scene.ts):
+// one opaque backdrop painted over `bg`, the terminal background, so the band has no
+// visible edge, and one transparent sprite per actor. An actor's sprite is its pose at a
+// time, centred; where it stands at that time is a separate answer. Every motion repeats
+// with BACKLIT_PERIOD_S, so a pose and a position depend only on the time within the loop.
+import { WALL_E_BOB_LENGTH, drawEve, drawWallE } from "./characters.ts";
 import { type Canvas, Painter, type Rgb, hash, lerp, mix } from "./paint.ts";
 
 // rose-pine-moon accents, matching dev's footer.
@@ -19,9 +24,25 @@ const RIM = mix(GOLD, ROSE, 0.3);
 export const BACKLIT_PERIOD_S = 20;
 const SUN_X = 0.68;
 const HORIZON = 0.93;
+/** How far WALL-E trails EVE, in seconds. */
+const CHASE_GAP_S = 1.6;
+/** EVE bobs this many times per cycle. A whole number, so the bob closes the loop. */
+const EVE_BOBS = 7;
 
-/** Pixels per sprite unit for a full-size character in a band of height H. */
+export type BacklitActor = "wall-e" | "eve";
+/** The actors, back to front. */
+export const BACKLIT_ACTORS: readonly BacklitActor[] = ["wall-e", "eve"];
+/**
+ * Half a sprite's width in local units. Everything an actor paints stays within it at any
+ * time: the turn, the lean of the hop, the rim light and the thruster glow.
+ */
+const HALF_WIDTH: Record<BacklitActor, number> = { "wall-e": 49, eve: 29 };
+
+/** Pixels per local unit for a full-size character in a band of height H. */
 const nearScale = (H: number): number => (0.8 * H) / 92;
+
+/** Width in pixels of an actor's sprite in a band of height H; the sprite is as high as the band. */
+export const backlitSpriteWidth = (actor: BacklitActor, H: number): number => 2 * Math.ceil(HALF_WIDTH[actor] * nearScale(H));
 
 type Towers = { W: number; base: number; spacing: number; minH: number; maxH: number; color: Rgb; seed: number };
 
@@ -65,20 +86,21 @@ export function paintBacklitBackdrop(canvas: Canvas, bg: Rgb): void {
   }
 }
 
-/**
- * Paint the frame at time `t` seconds into `canvas`, starting from `backdrop` (same size).
- */
-export function renderBacklit(canvas: Canvas, t: number, backdrop: Canvas): void {
-  canvas.copyFrom(backdrop);
-  const p = new Painter(canvas);
-  const { width: W, height: H } = canvas;
+type Stance = { x: number; travel: number; facing: number; squash: number };
+
+/** Both actors at time `t` seconds in a W by H band: where they stand and how high EVE hops. */
+function stage(t: number, W: number, H: number): { "wall-e": Stance; eve: Stance; hop: number } {
   const sN = nearScale(H);
-  const groundY = HORIZON * H;
-  const sunX = W * SUN_X;
   const leg = BACKLIT_PERIOD_S / 2;
-  const margin = 50 * sN;
-  const run = W - 2 * margin;
-  const at = (tt: number) => {
+  // The widest sprite still fits inside the band where the actors turn.
+  const margin = backlitSpriteWidth("wall-e", H) / 2;
+  const run = Math.max(0, W - 2 * margin);
+  // WALL-E's body bobs with the distance covered. Stretch that distance by a hair so that a
+  // cycle covers a whole number of bobs and the last pose leads into the first.
+  const lap = (2 * run) / sN;
+  const stride = lap > 0 ? (Math.max(1, Math.round(lap / WALL_E_BOB_LENGTH)) * WALL_E_BOB_LENGTH) / lap : 1;
+  const at = (time: number): Stance => {
+    const tt = ((time % BACKLIT_PERIOD_S) + BACKLIT_PERIOD_S) % BACKLIT_PERIOD_S;
     const phase = (Math.PI * tt) / leg;
     const legs = Math.floor(tt / leg);
     const x = margin + run * (0.5 - 0.5 * Math.cos(phase));
@@ -86,47 +108,62 @@ export function renderBacklit(canvas: Canvas, t: number, backdrop: Canvas): void
     const sin = Math.sin(phase);
     return {
       x,
-      travel: (legs * run + Math.abs(x - legStart)) / sN,
+      travel: ((legs * run + Math.abs(x - legStart)) / sN) * stride,
       facing: sin >= 0 ? 1 : -1,
       squash: 0.14 + 0.86 * Math.abs(sin) ** 0.6,
     };
   };
   const eve = at(t + leg * 0.15);
-  const wall = at(t + leg * 0.15 - 1.6);
+  const wall = at(t + leg * 0.15 - CHASE_GAP_S);
   const apart = (eve.x - wall.x) / (46 * sN);
   const meet = eve.facing !== wall.facing ? Math.exp(-apart * apart) : 0;
-  const hop = 34 * meet;
-  const eveY = groundY - (16 + 3 * Math.sin(t * 2.1) + hop) * sN;
-  const r = Math.max(1, H / 110);
+  return { "wall-e": wall, eve, hop: 34 * meet };
+}
 
-  // Rim light first: each silhouette once in RIM, nudged toward the sun; then the bodies over it.
+/** The x of an actor's centre at time `t` seconds, in pixels from the left of a W by H band. */
+export function backlitActorX(actor: BacklitActor, t: number, W: number, H: number): number {
+  return stage(t, W, H)[actor].x;
+}
+
+/**
+ * Paint an actor's pose at time `t` seconds into `sprite`, a cleared transparent canvas
+ * backlitSpriteWidth wide and H high, for a W by H band. The actor is centred, whatever its x.
+ */
+export function paintBacklitActor(sprite: Canvas, actor: BacklitActor, t: number, W: number, H: number): void {
+  const p = new Painter(sprite);
+  const sN = nearScale(H);
+  const groundY = HORIZON * H;
+  const sunX = W * SUN_X;
+  const { [actor]: who, hop } = stage(t, W, H);
+  const x = sprite.width / 2;
+  const r = Math.max(1, H / 110);
+  // Rim light first: the silhouette once in RIM, nudged toward the sun; then the body over it.
   for (const rim of [true, false]) {
-    for (const who of [wall, eve]) {
-      p.save();
-      let dx = 0;
-      let dy = 0;
-      if (rim) {
-        const near = Math.exp(-(((who.x - sunX) / (W * 0.45)) ** 2));
-        p.style.flat = RIM;
-        p.style.opacity = 0.35 + 0.65 * near;
-        dx = (Math.sign(sunX - who.x) || 1) * r;
-        dy = -r * 0.6;
-      } else {
-        p.style.silhouette = SHADOW;
-      }
-      if (who === wall) {
-        drawWallE(p, { x: wall.x + dx, y: groundY + dy, s: sN, facing: wall.facing, squash: wall.squash, travel: wall.travel });
-      } else {
-        drawEve(p, {
-          x: eve.x + dx,
-          y: eveY + dy,
-          s: sN,
-          facing: eve.facing,
-          squash: eve.squash,
-          lean: 0.14 * eve.squash - hop * 0.004 * eve.facing,
-        });
-      }
-      p.restore();
+    p.save();
+    let dx = 0;
+    let dy = 0;
+    if (rim) {
+      const near = Math.exp(-(((who.x - sunX) / (W * 0.45)) ** 2));
+      p.style.flat = RIM;
+      p.style.opacity = 0.35 + 0.65 * near;
+      dx = (Math.sign(sunX - who.x) || 1) * r;
+      dy = -r * 0.6;
+    } else {
+      p.style.silhouette = SHADOW;
     }
+    if (actor === "wall-e") {
+      drawWallE(p, { x: x + dx, y: groundY + dy, s: sN, facing: who.facing, squash: who.squash, travel: who.travel });
+    } else {
+      const bob = 3 * Math.sin((2 * Math.PI * EVE_BOBS * t) / BACKLIT_PERIOD_S);
+      drawEve(p, {
+        x: x + dx,
+        y: groundY - (16 + bob + hop) * sN + dy,
+        s: sN,
+        facing: who.facing,
+        squash: who.squash,
+        lean: 0.14 * who.squash - hop * 0.004 * who.facing,
+      });
+    }
+    p.restore();
   }
 }
