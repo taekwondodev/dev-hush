@@ -150,8 +150,8 @@ for (const name of ["edit", "write"]) {
 
 const childId = "12345678-1234-1234-1234-123456789abc";
 const childFailure = { id: childId, kind: "agent", status: "failed", error: "raw child error", logs: ["raw script output"] };
-const outcome = (items) => ({ role: "custom", customType: "dev/work-outcome", display: true,
-  content: "Work outcomes: producer observations, not verification. Read a result from offset 0 when it is not included. Honor dev-cycle checkpoints; report worktrees.\n" + JSON.stringify(items.map(({ id, kind, status, error }) => ({ id, kind, status, error }))),
+const outcome = (items) => ({ role: "custom", customType: "dev/work-result", display: true,
+  content: "Work results: verify against files or test output. Keep user approval steps; report remaining checkouts.\n" + JSON.stringify(items.map(({ id, kind, status, error }) => ({ id, kind, status, error }))),
   details: { attempts: items.map((item) => item.id), children: items.map(({ id, kind }) => ({ id, kind, startedAt: 0 })), outcomes: items }, timestamp: Date.now() });
 const childRow = new pi.CustomMessageComponent(outcome([childFailure]));
 assert.match(childRow.render(100).join("\n"), /\x1b\[31mChild failed:/, "failed children are red");
@@ -180,7 +180,7 @@ assert.equal(workRow.render(100)[0], "", "work failure notices add a blank row b
 assert.doesNotMatch(workRow.render(100).join("\n"), /raw child error|raw script output/, "work result notices do not expose logs");
 workRow.updateResult({ content: [], details: { kind: "runs", runs: { records: [childFailure, { ...childFailure, kind: "process" }] } }, isError: false });
 assert.match(workRow.render(100).join("\n"), /Child failed:/, "work list summaries retain failed children");
-workRow.updateResult({ content: [], details: { kind: "inspection", inspection: childFailure }, isError: false });
+workRow.updateResult({ content: [], details: { kind: "inspection", inspection: { run: childFailure, logs: [], record: {} } }, isError: false });
 assert.match(workRow.render(100).join("\n"), /Child failed:/, "an inspection of a failed child is flagged");
 workRow.updateResult({ content: [{ type: "text", text: JSON.stringify(childFailure) }], details: { kind: "log", log: { stream: "result", available: true, text: "" } }, isError: false });
 assert.deepEqual(workRow.render(100), [], "stream pages are not failures, whatever their text");

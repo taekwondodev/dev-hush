@@ -15,7 +15,7 @@ export function failedDevWorkChildren(details: unknown): string[] {
     case "run":
       return failedAgents([details.run]);
     case "inspection":
-      return failedAgents([details.inspection]);
+      return record(details.inspection) ? failedAgents([details.inspection.run]) : [];
     case "runs":
       return record(details.runs) && Array.isArray(details.runs.records) ? failedAgents(details.runs.records) : [];
     default:

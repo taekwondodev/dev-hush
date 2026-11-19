@@ -22,7 +22,7 @@ export function installHushDevWorkMessageLayout(): void {
   }
   const hidesMessage: MessagePatch["hidesMessage"] = (message) =>
     hushHidesTranscriptChrome() && message?.role === "custom" &&
-    message.display === true && message.customType === "dev/work-outcome";
+    message.display === true && message.customType === "dev/work-result";
   const installed = registry[HUSH_WORK_MESSAGES_PATCH];
   if (installed) {
     installed.hidesMessage = hidesMessage;
