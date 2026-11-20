@@ -159,7 +159,7 @@ assert.equal(workRow.render(100)[0], "", "work failure notices add a blank row b
 assert.doesNotMatch(workRow.render(100).join("\n"), /raw child error|raw script output/, "work result notices do not expose logs");
 workRow.updateResult({ content: [], details: { kind: "runs", runs: { records: [childFailure, { ...childFailure, kind: "process" }] } }, isError: false });
 assert.match(workRow.render(100).join("\n"), /Child failed:/, "work list summaries retain failed children");
-workRow.updateResult({ content: [], details: { kind: "inspection", inspection: childFailure }, isError: false });
+workRow.updateResult({ content: [], details: { kind: "inspection", inspection: { run: childFailure, logs: [], record: {} } }, isError: false });
 assert.match(workRow.render(100).join("\n"), /Child failed:/, "an inspection of a failed child is flagged");
 workRow.updateResult({ content: [{ type: "text", text: JSON.stringify(childFailure) }], details: { kind: "log", log: { stream: "result", available: true, text: "" } }, isError: false });
 assert.deepEqual(workRow.render(100), [], "stream pages are not failures, whatever their text");

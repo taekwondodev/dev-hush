@@ -1,5 +1,6 @@
 // Failed agent children come from dev's `details`, never from model-visible content:
-// `work` results carry a WorkResult, outcome messages carry their full outcome entries.
+// `work` results carry a WorkResult (an inspection holds its run under `run`), outcome
+// messages carry their full outcome entries.
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -15,7 +16,7 @@ export function failedDevWorkChildren(details: unknown): string[] {
     case "run":
       return failedAgents([details.run]);
     case "inspection":
-      return failedAgents([details.inspection]);
+      return record(details.inspection) ? failedAgents([details.inspection.run]) : [];
     case "runs":
       return record(details.runs) && Array.isArray(details.runs.records) ? failedAgents(details.runs.records) : [];
     default:
