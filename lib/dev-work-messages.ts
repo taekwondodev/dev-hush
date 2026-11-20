@@ -9,20 +9,12 @@ type MessageState = {
 };
 type MessagePatch = { hidesMessage: (message: MessageState["message"]) => boolean };
 const HUSH_WORK_MESSAGES_PATCH = Symbol.for("dev-hush:dev-work-messages:child-failures-red-spaced");
-const PREVIOUS_WORK_MESSAGES_PATCHES = [
-  Symbol.for("dev-hush:dev-work-messages:pi-0.85.1"),
-  Symbol.for("dev-hush:dev-work-messages:child-failures-only"),
-];
 
 export function installHushDevWorkMessageLayout(): void {
   const registry = globalThis as typeof globalThis & { [key: symbol]: MessagePatch | undefined };
-  for (const key of PREVIOUS_WORK_MESSAGES_PATCHES) {
-    const previous = registry[key];
-    if (previous) previous.hidesMessage = () => false;
-  }
   const hidesMessage: MessagePatch["hidesMessage"] = (message) =>
     hushHidesTranscriptChrome() && message?.role === "custom" &&
-    message.display === true && message.customType === "dev/work-outcome";
+    message.display === true && message.customType === "dev/work-result";
   const installed = registry[HUSH_WORK_MESSAGES_PATCH];
   if (installed) {
     installed.hidesMessage = hidesMessage;

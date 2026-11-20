@@ -24,30 +24,9 @@ const [pi, visibility, assistantAdapter, toolAdapter, workAdapter] = await Promi
   jiti.import("./lib/dev-work-messages.ts"),
 ]);
 pi.initTheme("dark", false);
-const legacyAssistantPatch = { hidesThinking: () => true };
-globalThis[Symbol.for("dev-hush:assistant-layout:pi-0.85.1")] = legacyAssistantPatch;
-const finalOnlyPatch = { hidesThinking: () => true };
-globalThis[Symbol.for("dev-hush:assistant-layout:pi-0.87.1:final-only")] = finalOnlyPatch;
-// Reproduce the old tool-use render hook so reload must make it inert.
-const stockRender = pi.AssistantMessageComponent.prototype.render;
-pi.AssistantMessageComponent.prototype.render = function (width) {
-  return finalOnlyPatch.hidesThinking() && this.lastMessage?.stopReason === "toolUse"
-    ? [] : stockRender.call(this, width);
-};
-const compactFailuresPatch = { hidesShell: () => true };
-globalThis[Symbol.for("dev-hush:conversation-tool-shell-layout:pi-0.87.1:compact-failures")] = compactFailuresPatch;
-const legacyWorkPatch = { hidesMessage: () => true };
-globalThis[Symbol.for("dev-hush:dev-work-messages:pi-0.85.1")] = legacyWorkPatch;
-const legacyToolPatch = { hidesShell: () => true };
-globalThis[Symbol.for("dev-hush:source-aware-tool-shells:pi-0.85.1")] = legacyToolPatch;
 assistantAdapter.installHushCollapsedThinkingLayout();
 toolAdapter.installHushBuiltInToolShellLayout();
 workAdapter.installHushDevWorkMessageLayout();
-assert.equal(legacyAssistantPatch.hidesThinking(), false, "reload deactivates the prior assistant hook");
-assert.equal(finalOnlyPatch.hidesThinking(), false, "reload deactivates the final-only hook");
-assert.equal(legacyToolPatch.hidesShell(), false, "reload deactivates the prior tool hook");
-assert.equal(compactFailuresPatch.hidesShell(), false, "reload deactivates ordinary tool failure notices");
-assert.equal(legacyWorkPatch.hidesMessage(), false, "reload deactivates the previous work-outcome filter");
 visibility.setHushPresentation(true);
 
 const intermediate = new pi.AssistantMessageComponent({ role: "assistant", content: [
@@ -150,8 +129,8 @@ for (const name of ["edit", "write"]) {
 
 const childId = "12345678-1234-1234-1234-123456789abc";
 const childFailure = { id: childId, kind: "agent", status: "failed", error: "raw child error", logs: ["raw script output"] };
-const outcome = (items) => ({ role: "custom", customType: "dev/work-outcome", display: true,
-  content: "Work outcomes: producer observations, not verification. Read a result from offset 0 when it is not included. Honor dev-cycle checkpoints; report worktrees.\n" + JSON.stringify(items.map(({ id, kind, status, error }) => ({ id, kind, status, error }))),
+const outcome = (items) => ({ role: "custom", customType: "dev/work-result", display: true,
+  content: "Work results: verify against files or test output. Keep user approval steps; report remaining checkouts.\n" + JSON.stringify(items.map(({ id, kind, status, error }) => ({ id, kind, status, error }))),
   details: { attempts: items.map((item) => item.id), children: items.map(({ id, kind }) => ({ id, kind, startedAt: 0 })), outcomes: items }, timestamp: Date.now() });
 const childRow = new pi.CustomMessageComponent(outcome([childFailure]));
 assert.match(childRow.render(100).join("\n"), /\x1b\[31mChild failed:/, "failed children are red");

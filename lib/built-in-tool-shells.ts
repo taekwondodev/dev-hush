@@ -7,23 +7,11 @@ import { hushChildFailureNotice, failedDevWorkChildren } from "./dev-work-policy
 type ToolRowPresentationState = { toolName: string; result?: { details?: unknown } };
 type ToolShellPatch = { hidesShell: () => boolean };
 const HUSH_TOOL_SHELL_PATCH = Symbol.for("dev-hush:conversation-tool-shell-layout:child-failures-red-spaced");
-const LEGACY_TOOL_SHELL_PATCHES = [
-  Symbol.for("dev-hush:conversation-tool-shell-layout:child-failures-only"),
-  Symbol.for("dev-hush:conversation-tool-shell-layout:pi-0.87.1:compact-failures"),
-  Symbol.for("dev-hush:conversation-tool-shell-layout:pi-0.87.1"),
-  Symbol.for("dev-hush:source-aware-tool-shells:pi-0.85.1"),
-  Symbol.for("dev-hush:tool-shell-layout:pi-0.85.1"),
-  Symbol.for("dev-hush:built-in-tool-shell-layout:pi-0.82.0"),
-] as const;
 
 export function installHushBuiltInToolShellLayout(): void {
   const registry = globalThis as typeof globalThis & {
     [key: symbol]: ToolShellPatch | undefined;
   };
-  for (const key of LEGACY_TOOL_SHELL_PATCHES) {
-    const legacy = registry[key];
-    if (legacy) legacy.hidesShell = () => false;
-  }
   const hidesShell = (): boolean => hushHidesTranscriptChrome();
   const installed = registry[HUSH_TOOL_SHELL_PATCH];
   if (installed) {
