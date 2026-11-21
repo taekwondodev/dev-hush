@@ -2,7 +2,7 @@ https://github.com/user-attachments/assets/051dd9a3-8a47-4166-ba55-a0036985b586
 
 <h1 align="center">dev-hush</h1>
 
-<p align="center">Hush hides Pi's thinking and tool activity, so only the conversation stays on screen.</p>
+<p align="center">Developing is fun!</p>
 
 ## Install
 
